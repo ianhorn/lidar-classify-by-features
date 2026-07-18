@@ -1,0 +1,14 @@
+{
+    "pipeline": [
+        {
+            "type":"readers.copc",
+            "filename":"/mnt/d/Data/lidar/N075E299_LAS_Phase2.copc.laz"
+        },
+        {
+            "type":"filters.hag_delaunay"
+        },
+        {
+            "type":"filters.normal"
+        }
+    ]
+}
