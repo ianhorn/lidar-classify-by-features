@@ -1,0 +1,3 @@
+pystac==1.15.1
+pystac_client==0.9.0
+Requests==2.34.2
