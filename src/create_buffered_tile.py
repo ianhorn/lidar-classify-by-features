@@ -10,7 +10,7 @@ import json
 import requests
 from pystac import Item
 from pathlib import Path
-from pystac_client import Client, ItemSearch
+from pystac_client import Client
 
 
 def get_stac_item(item_id: str, item_collection: str, item_api_url: str):
