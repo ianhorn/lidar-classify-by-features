@@ -10,7 +10,7 @@ import json
 import requests
 from pystac import Item
 from pathlib import Path
-from pystac_client import ItemSearch
+from pystac_client import Client, ItemSearch
 
 
 def get_stac_item(item_id: str, item_collection: str, item_api_url: str):
@@ -47,52 +47,69 @@ def get_buffered_bbox(item_bbox, distance_degrees):
     buffered_bbox = [
         minx - distance_degrees,
         miny - distance_degrees,
-        maxx - distance_degrees,
-        maxy - distance_degrees
+        maxx + distance_degrees,
+        maxy + distance_degrees
     ]
     return buffered_bbox
 
 
 def search_stac(stac_api, collection, buffered_bbox):
+    """
+    Use pystac_client to open the stac api
+    search by bbox
+    return a list of hrefs
+    """
 
-    url = f'{stac_api}/search'
+    client = Client.open(f'{stac_api}/')
+    search = client.search(
+        max_items=10,
+        collections=collection,
+        bbox = buffered_bbox
+    )
 
-    payload = {
-        "collections": [collection],
-        "bbox": buffered_bbox
-    }
+    print(f'Found {len(list(search.items()))} items\n')
+    item_list = list(search.items())
+    for i in item_list:
+        print(i.id)
 
-    headers = {
-        "accept": "application/geo+json",
-        "Content-Type": "application/json",
-    }
+    href_list = []
 
-    response = requests.post(url, json=payload, headers=headers)
-    response.raise_for_status()
+    for item in item_list:
+        for asset in item.assets.values():
+            href_list.append(asset.href)
+    for h in href_list:
+        print(h)
 
-    data = response.json()
-    print(f'Response Status: {response.status_code}')
-    # print(json.dumps(data, indent=2))
+    return href_list
+
+# def process_copc(copc):
+
+#     json = {
+
+#     }
+
 
 
 def main():
 
     item_id = 'N075E299_LAS_Phase2.copc'
+    # item_id = 'N075E295_LAS_Phase2.copc'
     collection = 'laz-phase2'
     stac = 'https://spved5ihrl.execute-api.us-west-2.amazonaws.com'
 
     item = get_stac_item(item_id, collection, stac)
     bbox = item.bbox
-    print(f'bbox {bbox}')
+    print(f'bbox {bbox}') 
+
     buffer = 30
     distance = get_distance_degrees(buffer)
     print(f'Degrees: {distance}')
+    
     bbox_buffer = get_buffered_bbox(item.bbox, distance)
     print(f'Buffered bbox: {bbox_buffer}')
 
-    print(f'Item: {item}\n')
-
     stac_search = search_stac(stac, collection, bbox_buffer)
+
 
 if __name__ == '__main__':
     main()
