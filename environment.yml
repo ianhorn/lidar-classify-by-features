@@ -4,6 +4,9 @@ channels:
 dependencies:
   - pdal
   - shapely
+  - duckdb
+  - pyarrow
+  - geopandas
   - pip:
     - aiofiles==25.1.0
     - aiohappyeyeballs==2.7.1
