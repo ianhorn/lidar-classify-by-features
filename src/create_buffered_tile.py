@@ -158,7 +158,7 @@ def main():
     bbox = item.bbox
     print(f'bbox {bbox}') 
 
-    buffer = 30
+    buffer = 30  # in meters
     distance = get_distance_degrees(buffer)
     print(f'Degrees: {distance}')
     
