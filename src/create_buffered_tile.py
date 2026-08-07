@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-T"""
+"""
 This script uses the bounding box of kyfromabove lidar tile, buffers it by a 
 specfied distance, uses the bufferred bounding box to search stac for lidar tiles.
 The points from each lidar will be read to create a new temporary local tile. 
