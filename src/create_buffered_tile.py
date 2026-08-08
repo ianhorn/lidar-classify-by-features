@@ -10,7 +10,7 @@ The points from each lidar will be read to create a new temporary local tile.
 import json
 import pdal
 import time
-import requests
+# import requests
 from pystac import Item
 from pathlib import Path
 from pyproj import Transformer
