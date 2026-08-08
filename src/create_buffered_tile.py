@@ -10,7 +10,8 @@ The points from each lidar will be read to create a new temporary local tile.
 import json
 import pdal
 import time
-# import requests
+import duckdb
+import geopandas as gpd
 from pystac import Item
 from pathlib import Path
 from pyproj import Transformer
@@ -85,6 +86,7 @@ def pdal_bounds(bbox):
     xmin, ymin, xmax, ymax = bbox
     return f"([{xmin},{xmax}],[{ymin},{ymax}])"
 
+
 def search_stac(stac_api: str, collection: str, buffered_bbox):
     """
     Use pystac_client to open the stac api
@@ -146,6 +148,52 @@ def crop_copc(hrefs, bounds, out_laz):
     print(f"{count:,} points written")
     print(f"Elapsed: {elapsed:.1f} seconds")
 
+
+def get_buffered_tile_footprints(stac_item, url, bbox):
+    """
+    This function takes a bbox and returns a list of the 
+    footprints of the buffered tiles that intersect with it.
+    """
+
+    output_buidlings_file = f'/mnt/d/Data/builings/{stac_item.id[:7]}.parquet'
+
+    xmin = bbox[0]
+    ymin = bbox[1]
+    xmax = bbox[2]
+    ymax = bbox[3]
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial;")
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD spatial;")
+    con.execute("LOAD httpfs;")
+    con.execute("SET s3_region='us-west-2';")
+
+    query = f"""
+    SELECT id, height, geometry
+    FROM read_parquet('{url}', filename=true, hive_partitioning=1)
+    WHERE bbox.xmin <= {xmax}
+    AND bbox.xmax >= {xmin}
+    AND bbox.ymin <= {ymax}
+    AND bbox.ymax >= {ymin}
+    """
+
+    buildings_df = con.execute(query).df()
+    print(f"wrote {len(buildings_df):,} rows to {output_buidlings_file}")
+
+    buildings_gdf = gpd.GeoDataFrame(
+    buildings_df[["id", "height"]],
+    geometry=gpd.GeoSeries.from_wkb(buildings_df["geometry"].apply(bytes)),
+    crs="EPSG:4326")
+
+    print(buildings_gdf.geom_type.value_counts())
+
+    buildings_gdf.to_parquet(output_buidlings_file)
+    print(f"wrote {len(buildings_gdf):,} rows to {output_buidlings_file}")
+
+    return output_buidlings_file
+
+
 def main():
 
     item_id = 'N075E299_LAS_Phase2.copc'
@@ -177,6 +225,12 @@ def main():
 
     bounds = pdal_bounds(bbox_3089)
     crop_copc(hrefs, bounds, out_laz)
+
+    overture_release = '2026-07-22.0'
+    overture_url = f"s3://overturemaps-us-west-2/release/{overture_release}/theme=buildings/type=building/*"
+
+    tile_buildings = get_buffered_tile_footprints(item, overture_url, bbox_buffer)
+    print(f'{tile_buildings} created')
 
 
 if __name__ == '__main__':
