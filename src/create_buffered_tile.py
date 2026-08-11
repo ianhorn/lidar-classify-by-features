@@ -10,12 +10,25 @@ The points from each lidar will be read to create a new temporary local tile.
 import json
 import pdal
 import time
+import boto3
 import duckdb
 import geopandas as gpd
 from pystac import Item
 from pathlib import Path
 from pyproj import Transformer
 from pystac_client import Client
+from concurrent.futures import ThreadPoolExecutor
+
+S3_BUCKET = "lidar-classification"
+
+
+def upload_to_s3(local_path, bucket, key):
+    """Upload a local file to S3. Leaves the local copy in place -- it's still
+    needed by downstream steps (feature calculation) in the same environment."""
+
+    s3 = boto3.client("s3")
+    s3.upload_file(str(local_path), bucket, key)
+    print(f"uploaded {local_path} to s3://{bucket}/{key}")
 
 
 def get_stac_item(item_id: str, item_collection: str, item_api_url: str):
@@ -148,6 +161,8 @@ def crop_copc(hrefs, bounds, out_laz):
     print(f"{count:,} points written")
     print(f"Elapsed: {elapsed:.1f} seconds")
 
+    upload_to_s3(out_laz, S3_BUCKET, f"phase2/laz/{Path(out_laz).name}")
+
 
 def get_buffered_tile_footprints(stac_item, url, bbox):
     """
@@ -155,7 +170,7 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     footprints of the buffered tiles that intersect with it.
     """
 
-    output_buidlings_file = f'/mnt/d/Data/builings/{stac_item.id[:7]}.parquet'
+    output_buidlings_file = f'/mnt/d/Data/buildings/{stac_item.id[:8]}.parquet'
 
     xmin = bbox[0]
     ymin = bbox[1]
@@ -191,6 +206,8 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     buildings_gdf.to_parquet(output_buidlings_file)
     print(f"wrote {len(buildings_gdf):,} rows to {output_buidlings_file}")
 
+    upload_to_s3(output_buidlings_file, S3_BUCKET, f"buildings/{Path(output_buidlings_file).name}")
+
     return output_buidlings_file
 
 
@@ -224,12 +241,20 @@ def main():
     print(f"3089 bbox: {bbox_3089}")
 
     bounds = pdal_bounds(bbox_3089)
-    crop_copc(hrefs, bounds, out_laz)
 
     overture_release = '2026-07-22.0'
     overture_url = f"s3://overturemaps-us-west-2/release/{overture_release}/theme=buildings/type=building/*"
 
-    tile_buildings = get_buffered_tile_footprints(item, overture_url, bbox_buffer)
+    # crop_copc and get_buffered_tile_footprints don't depend on each other's
+    # output (both only need bbox_buffer/bounds), and both are dominated by
+    # network wait (S3), so run them on separate threads instead of back to back.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        crop_future = executor.submit(crop_copc, hrefs, bounds, out_laz)
+        footprints_future = executor.submit(get_buffered_tile_footprints, item, overture_url, bbox_buffer)
+
+        crop_future.result()
+        tile_buildings = footprints_future.result()
+
     print(f'{tile_buildings} created')
 
 
