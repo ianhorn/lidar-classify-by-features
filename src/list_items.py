@@ -23,7 +23,12 @@ def list_collection_items(stac_api: str, collection: str):
     """
 
     client = Client.open(f'{stac_api}/')
-    search = client.search(collections=[collection])
+    # STAC API pagination here is cursor-based (each page's "next" link embeds
+    # the last item id), so pages can't be fetched concurrently -- but the
+    # default page size is only 10 items/request. Bumping it to 1000 (server
+    # accepts up to ~2000, rejects 10000 as "Request Entity Too Large") cuts
+    # the number of sequential round-trips by ~100x.
+    search = client.search(collections=[collection], limit=1000)
 
     rows = []
     for item in search.items():
@@ -47,7 +52,8 @@ def main():
 
     stac = 'https://spved5ihrl.execute-api.us-west-2.amazonaws.com'
     phase = 'laz-phase2'
-    output_file = Path("stac_item_list.parquet")
+    repo_root = Path(__file__).resolve().parent.parent
+    output_file = repo_root / "stac_item_list.parquet"
 
     items_df = list_collection_items(stac, phase)
 
