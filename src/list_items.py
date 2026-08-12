@@ -8,9 +8,10 @@
 # August 11, 2026
 ############################################################
 
-from pathlib import Path
+import os
 
 import pandas as pd
+from pathlib import Path
 from pystac_client import Client
 
 from create_buffered_tile import upload_to_s3, S3_BUCKET
@@ -35,9 +36,10 @@ def list_collection_items(stac_api: str, collection: str):
         minx, miny, maxx, maxy = item.bbox
         rows.append({
             "id": item.id,
-            "collection": collection,
-            "datetime": item.datetime,
+            # "collection": collection,
+            # "datetime": item.datetime,
             "href": item.assets["pointcloud"].href,
+            "s3_uri": f's3://kyfromabove/elevation/PointCloud/Phase2/{item.id}.laz',
             "bbox_minx": minx,
             "bbox_miny": miny,
             "bbox_maxx": maxx,
