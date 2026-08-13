@@ -1,0 +1,5 @@
+
+lidar-files/*.laz
+lidar-files/*.las
+building-files/*.parquet
+lidar-features/*.parquet

@@ -1,10 +1,17 @@
 TOKEN
 PSEUDOCODE.md
-
+misc
+.laz
+.las
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
+[internal]
+CACHED
+ERROR
+resolve
+transferring
 
 # C extensions
 *.so

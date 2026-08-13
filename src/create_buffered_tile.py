@@ -57,7 +57,7 @@ def quarantine_href(href, bucket, prefix="phase2/laz-problematic"):
     tmp_path.unlink()
 
 
-def crop_single_href(href, bounds, out_path):
+def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
     """
     Crop one COPC file via the `pdal` CLI in a subprocess, not the Python
     bindings. PDAL's Python bindings raise an uncatchable C++ exception on
@@ -65,6 +65,13 @@ def crop_single_href(href, bounds, out_path):
     process, no Python `except:` can catch it); the CLI's own error handling
     exits cleanly with a non-zero return code instead, and subprocess
     isolation means even a hard crash there only kills the subprocess.
+
+    Retries a few times with a short linear backoff before giving up --
+    without this, a single transient blip (a brief DNS/network hiccup, a
+    momentary S3 throttle) permanently quarantines a perfectly good source
+    file and silently undercounts the tile, since `crop_copc` only fails
+    hard if every href fails; a partial read failure otherwise never
+    surfaces as an error.
     """
 
     pipeline = {
@@ -74,24 +81,37 @@ def crop_single_href(href, bounds, out_path):
         ]
     }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(pipeline, f)
-        pipeline_path = f.name
+    last_err = ""
+    for attempt in range(1, retries + 1):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(pipeline, f)
+            pipeline_path = f.name
 
-    try:
         try:
-            result = subprocess.run(
-                ["pdal", "pipeline", pipeline_path],
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "timed out after 300s"
-    finally:
-        Path(pipeline_path).unlink()
+            try:
+                result = subprocess.run(
+                    ["pdal", "pipeline", pipeline_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                last_err = "timed out after 300s"
+                result = None
+        finally:
+            Path(pipeline_path).unlink()
 
-    return result.returncode == 0, result.stderr
+        if result is not None and result.returncode == 0:
+            return True, ""
+
+        if result is not None:
+            last_err = result.stderr
+
+        if attempt < retries:
+            print(f"WARNING: attempt {attempt}/{retries} failed for {href} ({last_err.strip()[:200]}), retrying")
+            time.sleep(backoff * attempt)
+
+    return False, last_err
 
 
 def get_stac_item(item_id: str, item_collection: str, item_api_url: str):
@@ -280,7 +300,7 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     footprints of the buffered tiles that intersect with it.
     """
 
-    output_buidlings_file = f'/mnt/d/Data/buildings/{stac_item.id[:8]}.parquet'
+    output_buidlings_file = f'building-files/{stac_item.id[:8]}.parquet'
 
     xmin = bbox[0]
     ymin = bbox[1]
@@ -324,7 +344,7 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
 def main():
 
     item_id = 'N075E299_LAS_Phase2.copc'
-    out_laz = Path('/mnt/d/Data/lidar/N075E299.laz')
+    out_laz = Path('lidar-files/N075E299.laz')
     # item_id = 'N075E295_LAS_Phase2.copc'
     collection = 'laz-phase2'
     stac = 'https://spved5ihrl.execute-api.us-west-2.amazonaws.com'

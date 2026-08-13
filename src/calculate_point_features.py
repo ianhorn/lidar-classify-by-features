@@ -242,9 +242,9 @@ def export_features(xyz, points, hag, geom_vec, output_file):
 
 def main():
 
-    lasfile = "/mnt/d/Data/lidar/N075E299.laz"
-    footprints_file = "/mnt/d/Data/buildings/N075E299.parquet"
-    output_file = "/mnt/d/Data/lidar_features/N075E299.parquet"
+    lasfile = "lidar-files/N075E299.laz"
+    footprints_file = "building-files/N075E299.parquet"
+    output_file = "lidar-features/N075E299.parquet"
     radius = 7.0
     chunk_size = 90_000
 
