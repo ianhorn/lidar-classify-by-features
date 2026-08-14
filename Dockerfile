@@ -14,5 +14,5 @@ COPY lidar-features ./lidar-features
 SHELL ["mamba", "run", "-n", "lidar-classification", "/bin/bash", "-c"]
 
 
-
+ENTRYPOINT [ "src/main.py" ]
 
