@@ -73,6 +73,8 @@ def process(stac_item):
 
     # stac item
     item_id = stac_item
+    if 'copz' in item_id:
+        item_id.str.replace('copz', 'copc')
 
     try:
         lasfile = Path(f'lidar-file/{item_id}.laz')
@@ -87,7 +89,7 @@ def process(stac_item):
         # increase bbox by 30 meter buffer
         buffer = 30
         distance = cbt.get_distance_degrees(buffer)
-        bbox_buffer = cbt.get_buffered_bbox
+        bbox_buffer = cbt.get_buffered_bbox(bbox, distance)
         print(f'Degrees: {distance}')
         hrefs = cbt.search_stac(stac, collection, bbox_buffer)
 
@@ -156,7 +158,7 @@ def process(stac_item):
 
 futures = []
 for _, row in df.iterrows():
-    future = client.submit(process, row[0])
+    future = client.submit(process, row['id'])
     futures.append(future)
 
 results = client.gather(futures)
