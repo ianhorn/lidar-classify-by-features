@@ -12,6 +12,9 @@ CACHED
 ERROR
 resolve
 transferring
+building-files*
+lidar-files*
+lidar-features*
 
 # C extensions
 *.so
