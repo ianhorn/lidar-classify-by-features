@@ -129,8 +129,10 @@ def process(stac_item):
 
         print(f'{tile_buildings} created')
 
-        # create building footprints file
-        footprints_file = f'building-files/{item.parquet}.parquet'
+        # building footprints file -- tile_buildings is the exact path
+        # get_buffered_tile_footprints already wrote, so reuse it directly
+        # instead of reconstructing it (item.parquet isn't a real attribute).
+        footprints_file = tile_buildings
         features_file = f'lidar-features/{item.id}.parquet'
         radius = 7.0
         chunk_size = 90_000
@@ -153,11 +155,25 @@ def process(stac_item):
         geom_vec["WithinFootprint"] = within_footprint
         geom_vec["FootprintHeight"] = footprint_height
 
+        # footprints_file is already uploaded to S3 inside
+        # get_buffered_tile_footprints and is only needed locally up to this
+        # point -- without this it accumulates on the worker's disk forever,
+        # once per tile.
+        Path(footprints_file).unlink(missing_ok=True)
+        print(f'"{footprints_file}" deleted.')
+
         # export features to parquet
         cpf.export_features(xyz, points, hag, geom_vec, features_file)
         print(f'Delete features file "{features_file}"')
         Path(features_file).unlink(missing_ok=True)
         print(f'"{features_file}" deleted.')
+
+        # lasfile is already uploaded to S3 inside crop_copc and is only
+        # needed locally up to this point (feature computation just read
+        # it) -- without this it accumulates on the worker's disk forever,
+        # once per tile.
+        Path(lasfile).unlink(missing_ok=True)
+        print(f'"{lasfile}" deleted.')
 
         return item_id, "ok", ""
     except Exception as e:

@@ -243,8 +243,8 @@ def search_stac(stac_api: str, collection: str, buffered_bbox):
 
     print(f'Found {len(list(search.items()))} items\n')
     item_list = list(search.items())
-    for i in item_list:
-        print(i)
+    # for i in item_list:
+    #     print(i)
 
     # Each STAC item carries other assets besides the point cloud itself
     # (e.g. a .png thumbnail) -- only the .laz is a real COPC file PDAL can
@@ -257,8 +257,8 @@ def search_stac(stac_api: str, collection: str, buffered_bbox):
         for asset in item.assets.values():
             if asset.href.endswith(".laz"):
                 href_list.append(asset.href)
-    for h in href_list:
-        print(h)
+    # for h in href_list:
+    #     print(h)
 
     return href_list
 
@@ -337,8 +337,20 @@ def crop_copc(hrefs, bounds, out_laz, quarantine_bucket=S3_BUCKET):
     # no S3/arbiter risk, but a write failure (e.g. permissions, disk full)
     # throws the same kind of uncatchable C++ exception either way. Isolating
     # it in a subprocess means a crash here only kills that subprocess.
+    #
+    # writers.las, not writers.copc: multiple reader stages feeding a single
+    # writers.copc are treated as separate "views", and writers.copc doesn't
+    # support that -- it silently overwrites its output with each view in
+    # turn, keeping only the LAST good_path's points and discarding
+    # everything else (confirmed: a merge of 4 real cropped parts produced
+    # an output with exactly the last file's point count). writers.las
+    # concatenates multiple views correctly by default, and the octree/
+    # spatial-index structure COPC provides is never needed here anyway --
+    # this file is only ever read back whole, locally, by
+    # calculate_point_features, not queried selectively like the original
+    # S3 sources.
     merge_pipeline = {
-        "pipeline": [str(p) for p in good_paths] + [{"type": "writers.copc", "filename": str(out_laz)}]
+        "pipeline": [str(p) for p in good_paths] + [{"type": "writers.las", "filename": str(out_laz)}]
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(merge_pipeline, f)
@@ -375,6 +387,10 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     """
 
     output_buidlings_file = f'building-files/{stac_item.id}.parquet'
+    # Worker-side write -- main.py's mkdir for this folder only runs on the
+    # client machine, not on the remote Coiled worker, so it must be created
+    # here too (same reasoning as crop_copc's out_laz.parent.mkdir).
+    Path(output_buidlings_file).parent.mkdir(parents=True, exist_ok=True)
 
     xmin = bbox[0]
     ymin = bbox[1]
@@ -410,7 +426,7 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     buildings_gdf.to_parquet(output_buidlings_file)
     print(f"wrote {len(buildings_gdf):,} rows to {output_buidlings_file}")
 
-    upload_to_s3(output_buidlings_file, S3_BUCKET, f"phase2/buildings/{Path(output_buidlings_file).name}")
+    upload_to_s3(output_buidlings_file, S3_BUCKET, f"phase2/buildings/{stac_item.id}_buffered30m.parquet")
 
     return output_buidlings_file
 
@@ -422,14 +438,13 @@ def main():
     # item_id = 'N075E295_LAS_Phase2.copc'
     collection = 'laz-phase2'
     stac = 'https://spved5ihrl.execute-api.us-west-2.amazonaws.com'
-
     item = get_stac_item(item_id, collection, stac)
     bbox = item.bbox
-    print(f'bbox {bbox}') 
+    # print(f'bbox {bbox}') 
 
     buffer = 30  # in meters
     distance = get_distance_degrees(buffer)
-    print(f'Degrees: {distance}')
+    # print(f'Degrees: {distance}')
     
     bbox_buffer = get_buffered_bbox(item.bbox, distance)
     print(f'Buffered bbox: {bbox_buffer}')
@@ -437,8 +452,8 @@ def main():
 
     hrefs = search_stac(stac, collection, bbox_buffer)
     # print(stac_search)
-    for h in hrefs:
-        print(h)
+    # for h in hrefs:
+        # print(h)
 
     bbox_3089 = reproject_bbox(bbox_buffer)
 

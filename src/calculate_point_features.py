@@ -41,7 +41,7 @@ def load_points(lasfile):
 
     pipeline = {
         "pipeline": [
-            lasfile,
+            str(lasfile),
             {"type": "filters.hag_delaunay"},
         ]
     }
