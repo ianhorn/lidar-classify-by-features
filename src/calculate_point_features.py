@@ -33,7 +33,7 @@ def upload_to_s3(local_path, bucket, key):
 
 def load_points(lasfile):
     """
-    Read a LAS/LAZ/COPC file and add HeightAboveGround via filters.hag_delaunay
+    Read a LAS file and add HeightAboveGround via filters.hag_delaunay
     (builds a ground TIN from Classification == 2 points, computes each point's
     height above it). HeightAboveGround comes out in the same units as the
     source data (US survey feet here), since it's just Z - interpolated_ground_Z.
@@ -41,7 +41,7 @@ def load_points(lasfile):
 
     pipeline = {
         "pipeline": [
-            str(lasfile),
+            {"type": "readers.las", "filename": str(lasfile)},
             {"type": "filters.hag_delaunay"},
         ]
     }
