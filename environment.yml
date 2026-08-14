@@ -1,4 +1,4 @@
-name: lidar-calculate-features
+name: base
 channels:
   - conda-forge
 dependencies:

@@ -156,7 +156,7 @@ def process(stac_item):
 
 futures = []
 for _, row in df.iterrows():
-    future = client.submit(process, row)
+    future = client.submit(process, row[0])
     futures.append(future)
 
 results = client.gather(futures)
