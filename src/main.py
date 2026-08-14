@@ -38,16 +38,22 @@ df.shape
 #                     CREATE VARIABLES                    #
 ############################################################
 
+# These names must match the hardcoded path prefixes used inside process()
+# (lasfile, footprints_file, features_file) -- a mismatch here means the
+# directory a worker tries to write into doesn't exist, which crashes the
+# whole worker process (PDAL's write failure throws an uncaught C++
+# exception), not just the one task.
+
 # add buildings folder that will store building parquet files
-buildings = Path('buildings')
+buildings = Path('building-files')
 buildings.mkdir(exist_ok=True)
 
 # add a laz folder that will temporarily hold laz files
-laz_path = Path('laz')
+laz_path = Path('laz-files')
 laz_path.mkdir(exist_ok=True)
 
 # add a lidar features folders that will hold feature parquet files
-lidar_features = Path('lidar_features')
+lidar_features = Path('lidar-features')
 lidar_features.mkdir(exist_ok=True)
 
 
@@ -84,7 +90,7 @@ def process(stac_item):
         item_id = item_id.replace('copz', 'copc')
 
     try:
-        lasfile = Path(f'lidar-file/{item_id}.laz')
+        lasfile = Path(f'laz-files/{item_id}.laz')
         collection = 'laz-phase2'
         stac = 'https://drwgni8q1h.execute-api.us-west-2.amazonaws.com'
 

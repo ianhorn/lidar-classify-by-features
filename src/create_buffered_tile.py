@@ -8,18 +8,8 @@ The points from each lidar will be read to create a new temporary local tile.
 
 
 import json
-import locale
 import math
 import os
-
-# pyproj's Python log callback crashes on a non-UTF8 PROJ warning before we
-# ever see what it says (see UnicodeDecodeError in reproject_bbox). PROJ_DEBUG
-# writes PROJ's own debug output straight to stderr via C fprintf, bypassing
-# that broken callback entirely, so this is diagnostic-only -- set before
-# pyproj/PROJ is imported so it's picked up at context creation.
-os.environ["PROJ_DEBUG"] = "3"
-
-import pdal
 import time
 import boto3
 import duckdb
@@ -31,23 +21,11 @@ import pandas as pd
 from datetime import datetime, timezone
 from pystac import Item
 from pathlib import Path
-from pyproj import Transformer
-from pyproj.transformer import AreaOfInterest
 from pystac_client import Client
 from concurrent.futures import ThreadPoolExecutor
 
-S3_BUCKET = "lidar-classification"
 
-# Coiled workers injecting LC_ALL/LANG via `Cluster(environ=...)` doesn't
-# reach the C locale -- that env var gets patched into an already-running
-# worker's os.environ by a Dask plugin, which glibc never re-reads. Only an
-# explicit setlocale() call changes what pyproj/PROJ actually use. Runs once
-# at module import (this file is uploaded and reloaded per-worker). Wrapped
-# because setlocale raises if the locale isn't installed on the box.
-try:
-    locale.setlocale(locale.LC_ALL, "C.UTF-8")
-except locale.Error as e:
-    print(f"WARNING: could not set locale to C.UTF-8: {e}")
+S3_BUCKET = "lidar-classification"
 
 
 def upload_to_s3(local_path, bucket, key):
@@ -179,44 +157,69 @@ def get_buffered_bbox(item_bbox, distance_degrees):
 
 def reproject_bbox(bbox, src_epsg=4326, dst_epsg=3089):
     """
-    Reproject a WGS84 bbox to Kentucky Single Zone (EPSG:3089).
+    Reproject a WGS84 bbox to Kentucky Single Zone (EPSG:3089) via a PDAL
+    CLI subprocess instead of pyproj's Python bindings.
+
+    pyproj's own log callback ('pyproj._context.pyproj_log_function') crashes
+    trying to decode a non-UTF8 warning that PROJ emits for this transform,
+    which corrupts the result into silently returning inf instead of raising
+    -- reproducible 100% of the time on Coiled workers, and unaffected by
+    forcing a UTF-8 locale, narrowing the operation search with
+    area_of_interest, or disabling PROJ logging outright (all tried and
+    confirmed not to help). That callback only exists because pyproj wires
+    it up in Python; PDAL's own C++ PROJ integration doesn't register it, so
+    it isn't exposed to the same bug even though it links the same libproj.
+    Subprocess isolation also means a crash here (if it happens anyway)
+    can't take down the parent process, matching crop_single_href's pattern.
     """
 
     minx, miny, maxx, maxy = bbox
 
-    # Without an area_of_interest, PROJ searches all registered coordinate
-    # operations between the two CRS and can pick an unnecessarily complex
-    # one (observed via PROJ_DEBUG: a topocentric/geocentric 3D pipeline for
-    # what should be a plain 2D projection) -- something in that pipeline's
-    # setup logs a non-UTF8 warning that crashes pyproj's log callback and
-    # corrupts the transform into returning inf. Narrowing the search to our
-    # actual bbox should make PROJ pick the simple, direct operation instead.
-    transformer = Transformer.from_crs(
-        src_epsg,
-        dst_epsg,
-        always_xy=True,
-        area_of_interest=AreaOfInterest(minx, miny, maxx, maxy),
-    )
+    in_path = Path(tempfile.gettempdir()) / f"reproject_in_{os.getpid()}_{id(bbox)}.csv"
+    out_path = Path(tempfile.gettempdir()) / f"reproject_out_{os.getpid()}_{id(bbox)}.csv"
+    in_path.write_text(f"X,Y\n{minx},{miny}\n{maxx},{maxy}\n")
 
-    x1, y1 = transformer.transform(minx, miny)
-    x2, y2 = transformer.transform(maxx, maxy)
+    pipeline = {
+        "pipeline": [
+            {"type": "readers.text", "filename": str(in_path)},
+            {"type": "filters.reprojection", "in_srs": f"EPSG:{src_epsg}", "out_srs": f"EPSG:{dst_epsg}"},
+            {"type": "writers.text", "filename": str(out_path), "order": "X,Y"},
+        ]
+    }
 
-    result = [
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(pipeline, f)
+        pipeline_path = f.name
+
+    try:
+        result = subprocess.run(
+            ["pdal", "pipeline", pipeline_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"PDAL reprojection failed: {result.stderr.strip()[:500]}")
+
+        out_df = pd.read_csv(out_path)
+        x1, y1 = out_df.iloc[0][["X", "Y"]]
+        x2, y2 = out_df.iloc[1][["X", "Y"]]
+    finally:
+        Path(pipeline_path).unlink(missing_ok=True)
+        in_path.unlink(missing_ok=True)
+        out_path.unlink(missing_ok=True)
+
+    result_bbox = [
         min(x1, x2),
         min(y1, y2),
         max(x1, x2),
         max(y1, y2)
     ]
 
-    # A failed PROJ transform (e.g. a missing/unreachable datum-shift grid)
-    # doesn't raise -- it silently returns inf. Left unchecked, that inf bbox
-    # turns into an unusable PDAL bounds string, which makes every href for
-    # the tile fail readers.copc and quarantines perfectly good source files.
-    # Fail loudly here instead so the real cause is catchable and visible.
-    if not all(math.isfinite(v) for v in result):
-        raise RuntimeError(f"reproject_bbox produced non-finite coordinates: {result} (from {bbox})")
+    if not all(math.isfinite(v) for v in result_bbox):
+        raise RuntimeError(f"reproject_bbox produced non-finite coordinates: {result_bbox} (from {bbox})")
 
-    return result
+    return result_bbox
 
 
 def pdal_bounds(bbox):
@@ -322,16 +325,40 @@ def crop_copc(hrefs, bounds, out_laz, quarantine_bucket=S3_BUCKET):
     if not good_paths:
         raise RuntimeError("no readable COPC files -- nothing to crop for this tile")
 
-    # Merge the successfully-cropped parts. Pure local disk reads at this
-    # point, so the Python bindings are safe to use (no S3/arbiter risk).
+    # Ensure the output directory exists -- a missing directory here throws
+    # an uncaught pdal::pdal_error deep in PDAL's C++ writer, which is not
+    # the same as any other Python exception: it aborts the whole process
+    # (SIGABRT), killing every other task running on the same worker along
+    # with this one, not just this tile. Observed in production.
+    Path(out_laz).parent.mkdir(parents=True, exist_ok=True)
+
+    # Merge the successfully-cropped parts via the PDAL CLI in a subprocess,
+    # not the Python bindings -- these are local disk reads/writes so there's
+    # no S3/arbiter risk, but a write failure (e.g. permissions, disk full)
+    # throws the same kind of uncatchable C++ exception either way. Isolating
+    # it in a subprocess means a crash here only kills that subprocess.
     merge_pipeline = {
         "pipeline": [str(p) for p in good_paths] + [{"type": "writers.copc", "filename": str(out_laz)}]
     }
-    p = pdal.Pipeline(json.dumps(merge_pipeline))
-    count = p.execute()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(merge_pipeline, f)
+        merge_pipeline_path = f.name
+
+    try:
+        result = subprocess.run(
+            ["pdal", "pipeline", merge_pipeline_path],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    finally:
+        Path(merge_pipeline_path).unlink()
+
+    if result.returncode != 0:
+        raise RuntimeError(f"PDAL merge failed for {out_laz}: {result.stderr.strip()[:500]}")
 
     elapsed = time.perf_counter() - start
-    print(f"{count:,} points written ({len(good_paths)}/{len(hrefs)} source files readable)")
+    print(f"merged {len(good_paths)}/{len(hrefs)} source files into {out_laz}")
     print(f"Elapsed: {elapsed:.1f} seconds")
 
     for part_path in good_paths:
@@ -347,7 +374,7 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     footprints of the buffered tiles that intersect with it.
     """
 
-    output_buidlings_file = f'building-files/{stac_item.id[:8]}.parquet'
+    output_buidlings_file = f'building-files/{stac_item.id}.parquet'
 
     xmin = bbox[0]
     ymin = bbox[1]
