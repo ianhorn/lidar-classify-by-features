@@ -57,7 +57,14 @@ lidar_features.mkdir(exist_ok=True)
 
 cluster = Cluster(
     software='lidar-classification',
-    n_workers=150,
+    n_workers=2,
+    # Workers hit a 100%-repro UnicodeDecodeError inside pyproj's PROJ log
+    # callback on every WGS84->NAD83 transform (byte 0x80 at the same offset
+    # regardless of the bbox), which corrupts the transform into returning
+    # inf instead of raising cleanly. That matches PROJ emitting a non-UTF8
+    # warning (commonly a degree symbol) when no locale is set, which the
+    # miniforge base image doesn't set by default -- force one.
+    environ={"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
 )
 
 client = cluster.get_client()
@@ -74,7 +81,7 @@ def process(stac_item):
     # stac item
     item_id = stac_item
     if 'copz' in item_id:
-        item_id.str.replace('copz', 'copc')
+        item_id = item_id.replace('copz', 'copc')
 
     try:
         lasfile = Path(f'lidar-file/{item_id}.laz')
@@ -156,12 +163,22 @@ def process(stac_item):
 #                         RUN LOOP                        #
 ############################################################
 
-futures = []
+futures = {}
 for _, row in df.iterrows():
     future = client.submit(process, row['id'])
-    futures.append(future)
+    futures[future] = row['id']
 
-results = client.gather(futures)
+# client.gather(futures) raises on the first cancelled/errored future and
+# discards every other result along with it -- a single dead worker would
+# lose the whole batch's output. Gather each future individually instead so
+# one bad task only costs its own row.
+results = []
+for future, item_id in futures.items():
+    try:
+        results.append(future.result())
+    except Exception as e:
+        print(f'ERROR gathering {item_id}: {e}')
+        results.append((item_id, "error", str(e)))
 
 results_df = pd.DataFrame(results, columns=["item_id", "status", "error"])
 local_path = Path(tempfile.gettempdir()) / "future_results.parquet"

@@ -8,6 +8,17 @@ The points from each lidar will be read to create a new temporary local tile.
 
 
 import json
+import locale
+import math
+import os
+
+# pyproj's Python log callback crashes on a non-UTF8 PROJ warning before we
+# ever see what it says (see UnicodeDecodeError in reproject_bbox). PROJ_DEBUG
+# writes PROJ's own debug output straight to stderr via C fprintf, bypassing
+# that broken callback entirely, so this is diagnostic-only -- set before
+# pyproj/PROJ is imported so it's picked up at context creation.
+os.environ["PROJ_DEBUG"] = "3"
+
 import pdal
 import time
 import boto3
@@ -21,10 +32,22 @@ from datetime import datetime, timezone
 from pystac import Item
 from pathlib import Path
 from pyproj import Transformer
+from pyproj.transformer import AreaOfInterest
 from pystac_client import Client
 from concurrent.futures import ThreadPoolExecutor
 
 S3_BUCKET = "lidar-classification"
+
+# Coiled workers injecting LC_ALL/LANG via `Cluster(environ=...)` doesn't
+# reach the C locale -- that env var gets patched into an already-running
+# worker's os.environ by a Dask plugin, which glibc never re-reads. Only an
+# explicit setlocale() call changes what pyproj/PROJ actually use. Runs once
+# at module import (this file is uploaded and reloaded per-worker). Wrapped
+# because setlocale raises if the locale isn't installed on the box.
+try:
+    locale.setlocale(locale.LC_ALL, "C.UTF-8")
+except locale.Error as e:
+    print(f"WARNING: could not set locale to C.UTF-8: {e}")
 
 
 def upload_to_s3(local_path, bucket, key):
@@ -159,23 +182,41 @@ def reproject_bbox(bbox, src_epsg=4326, dst_epsg=3089):
     Reproject a WGS84 bbox to Kentucky Single Zone (EPSG:3089).
     """
 
+    minx, miny, maxx, maxy = bbox
+
+    # Without an area_of_interest, PROJ searches all registered coordinate
+    # operations between the two CRS and can pick an unnecessarily complex
+    # one (observed via PROJ_DEBUG: a topocentric/geocentric 3D pipeline for
+    # what should be a plain 2D projection) -- something in that pipeline's
+    # setup logs a non-UTF8 warning that crashes pyproj's log callback and
+    # corrupts the transform into returning inf. Narrowing the search to our
+    # actual bbox should make PROJ pick the simple, direct operation instead.
     transformer = Transformer.from_crs(
         src_epsg,
         dst_epsg,
-        always_xy=True
+        always_xy=True,
+        area_of_interest=AreaOfInterest(minx, miny, maxx, maxy),
     )
-
-    minx, miny, maxx, maxy = bbox
 
     x1, y1 = transformer.transform(minx, miny)
     x2, y2 = transformer.transform(maxx, maxy)
 
-    return [
+    result = [
         min(x1, x2),
         min(y1, y2),
         max(x1, x2),
         max(y1, y2)
     ]
+
+    # A failed PROJ transform (e.g. a missing/unreachable datum-shift grid)
+    # doesn't raise -- it silently returns inf. Left unchecked, that inf bbox
+    # turns into an unusable PDAL bounds string, which makes every href for
+    # the tile fail readers.copc and quarantines perfectly good source files.
+    # Fail loudly here instead so the real cause is catchable and visible.
+    if not all(math.isfinite(v) for v in result):
+        raise RuntimeError(f"reproject_bbox produced non-finite coordinates: {result} (from {bbox})")
+
+    return result
 
 
 def pdal_bounds(bbox):
@@ -202,14 +243,20 @@ def search_stac(stac_api: str, collection: str, buffered_bbox):
     for i in item_list:
         print(i)
 
+    # Each STAC item carries other assets besides the point cloud itself
+    # (e.g. a .png thumbnail) -- only the .laz is a real COPC file PDAL can
+    # read, so only keep that one. Otherwise crop_single_href wastes retries
+    # on files that were never valid COPC input and quarantines them for
+    # nothing.
     href_list = []
 
     for item in item_list:
         for asset in item.assets.values():
-            href_list.append(asset.href)
+            if asset.href.endswith(".laz"):
+                href_list.append(asset.href)
     for h in href_list:
         print(h)
-        
+
     return href_list
 
 
