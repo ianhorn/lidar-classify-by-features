@@ -79,7 +79,7 @@ def process(stac_item):
     try:
         lasfile = Path(f'lidar-file/{item_id}.laz')
         collection = 'laz-phase2'
-        stac = 'https://spved5ihrl.execute-api.us-west-2.amazonaws.com'
+        stac = 'https://drwgni8q1h.execute-api.us-west-2.amazonaws.com'
 
         # stac call
         item = cbt.get_stac_item(item_id, collection, stac)
