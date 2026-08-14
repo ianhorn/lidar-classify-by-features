@@ -1,4 +1,4 @@
-name: 
+name: lidar-classification
 channels:
   - conda-forge
 dependencies:
