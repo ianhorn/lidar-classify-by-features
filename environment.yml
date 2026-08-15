@@ -77,6 +77,7 @@ dependencies:
     - jaraco.functools==4.6.0
     - jeepney==0.9.0
     - jmespath==1.1.0
+    - joblib==1.5.3
     - joserfc==1.7.4
     - jsondiff==2.2.1
     - jsonref==1.1.0
@@ -159,6 +160,7 @@ dependencies:
     - rsa==4.7.2
     - rtoml==0.13.0
     - s3transfer==0.19.2
+    - scikit-learn==1.9.0
     - selenium==4.46.0
     - shapely==2.1.2
     - six==1.17.0

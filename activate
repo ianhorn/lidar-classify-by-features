@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-
-mamba activate ~/miniforge3/envs/pdalpy
