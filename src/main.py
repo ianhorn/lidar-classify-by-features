@@ -103,12 +103,10 @@ start_time = time.time()
 # calls inside process(). Same file, just already sitting at the repo root.
 df = pd.read_parquet('stac_item_list.parquet')
 
-# Where this machine should start in the list (vs. Coiled/laptop/
-# cold-harbor-pc, which each start from a different point so they don't
-# pile onto the same tiles) hasn't been decided yet -- deferred for now.
-# Plain top-down order in the meantime; the S3 skip-check in process()
-# makes that safe either way, just possibly redundant with the others
-# until this gets tuned too.
+# Starts from the bottom, working up -- imagestorage (identical specs)
+# starts from the top instead, so the two converge toward the middle
+# rather than racing over the same tiles.
+df = df.iloc[::-1]
 df.shape
 
 
