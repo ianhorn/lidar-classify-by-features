@@ -234,3 +234,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml*.ddb
 *.ddb
+*.copc.laz
+dev-features*
