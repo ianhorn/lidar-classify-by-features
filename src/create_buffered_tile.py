@@ -404,6 +404,15 @@ def get_buffered_tile_footprints(stac_item, url, bbox):
     con.execute("LOAD httpfs;")
     con.execute("SET s3_region='us-west-2';")
 
+    # DuckDB defaults to one thread per core and doesn't respect
+    # OMP_NUM_THREADS/OPENBLAS_NUM_THREADS (its own thread pool, not
+    # OpenMP-based) -- opt-in only, via an env var the Coiled branch never
+    # sets, so this is a no-op there and workers keep using their own
+    # default (matches their own core count).
+    max_workers = os.environ.get("LIDAR_LOCAL_MAX_WORKERS")
+    if max_workers:
+        con.execute(f"SET threads={int(max_workers)};")
+
     query = f"""
     SELECT id, height, geometry
     FROM read_parquet('{url}', filename=true, hive_partitioning=1)

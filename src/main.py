@@ -1,10 +1,37 @@
 #!/usr/bin/env python3
 
 ############################################################
-#               RUN DATAFRAME THROUGH COILED              #
+#               RUN DATAFRAME LOCALLY, SEQUENTIALLY       #
 ############################################################
 
-from coiled import Cluster
+# No Coiled/Dask here -- this branch runs on a single local machine instead
+# of a cloud cluster, since Coiled credits run out after ~20 hours/month.
+# process() is unchanged from the Coiled version: it was already
+# environment-agnostic (plain boto3 S3 calls, relative local paths, no
+# Coiled-specific code inside it), so nothing about *how a tile gets
+# processed* needed to change -- only how tiles get scheduled.
+#
+# Sequential on purpose, not a local process pool: a single tile's feature
+# computation was measured peaking at ~23GiB RAM on Coiled (one of the
+# denser buffered tiles, ~33M points). Running more than one of those
+# concurrently on a 32GB machine risks OOM with no equivalent to Dask's
+# pause/resume memory manager to catch it locally. DuckDB and NumPy/OpenBLAS
+# already parallelize across all local cores on their own for a single tile
+# (confirmed: DuckDB's default thread count and OpenBLAS both already use
+# all 24 cores here without any config from us), so going sequential doesn't
+# leave meaningful speed on the table -- it's a memory-safety choice, not a
+# parallelism tradeoff.
+
+# Cap at 20 of this machine's 24 cores, reserving 4 so the computer stays
+# usable for everything else while this runs for hours. Must be set before
+# numpy/create_buffered_tile/calculate_point_features are imported --
+# OpenBLAS reads OPENBLAS_NUM_THREADS at first use, and
+# calculate_point_features reads LIDAR_LOCAL_MAX_WORKERS at import time.
+import os
+os.environ["OPENBLAS_NUM_THREADS"] = "20"
+os.environ["OMP_NUM_THREADS"] = "20"
+os.environ["LIDAR_LOCAL_MAX_WORKERS"] = "20"
+
 import numpy as np
 from scipy.spatial import cKDTree
 import pandas as pd
@@ -42,7 +69,16 @@ def s3_object_exists(bucket, key):
 
 
 start_time = time.time()
-df = pd.read_parquet('s3://lidar-classification/phase2/stac_item_list.parquet')
+# Local copy, not S3 -- avoids re-downloading the same 1.9MB file every run,
+# and lets this run fully offline apart from the actual STAC/S3/Overture
+# calls inside process(). Same file, just already sitting at the repo root.
+df = pd.read_parquet('stac_item_list.parquet')
+
+# The Coiled run (still active separately) works through df top-down.
+# Reversing here means this local run starts from the opposite end, so the
+# two converge toward the middle instead of one redoing the other's work --
+# though the S3 skip-check in process() would catch that anyway.
+df = df.iloc[::-1]
 df.shape
 
 
@@ -67,49 +103,6 @@ laz_path.mkdir(exist_ok=True)
 # add a lidar features folders that will hold feature parquet files
 lidar_features = Path('lidar-features')
 lidar_features.mkdir(exist_ok=True)
-
-
-############################################################
-#                    CREATE A CLUSTER                      #
-############################################################
-
-cluster = Cluster(
-    software='lidar-classification',
-    # 150 exceeded the AWS account's current vCPU quota for the m6i.2xlarge
-    # bucket (698 vCPU limit / 8 vCPU per worker -> ~85 max); Coiled only
-    # provisioned 86 of 150 and the rest errored out. Staying under that
-    # ceiling with margin.
-    n_workers=80,
-    # Default no_client_timeout is 2 minutes -- if the local client
-    # disconnects (e.g. this machine sleeps) for longer than that, Coiled
-    # shuts down the whole cluster, killing every task in flight. This is a
-    # many-hour job across 45k tiles, so give it a lot of headroom.
-    no_client_timeout="12 hours",
-    # Workers were getting killed by Dask's own memory manager mid-tile
-    # (hit 80% of the default m6i.xlarge's 16GiB during feature computation
-    # on dense tiles, e.g. one buffered tile alone had ~15.8M points) --
-    # every task in flight at that moment silently gets lost, with no error
-    # message, blocking every tile from ever reaching the features upload.
-    # Bumping worker_memory alone didn't fix it: Coiled picked a
-    # proportionally bigger/more-CPU instance (8 vCPU for 32GiB), and Dask
-    # defaults to one task per thread -- so 8 tiles' feature computations
-    # ran concurrently on one worker and blew the budget right back to 80%
-    # anyway. Capping threads bounds how many tiles' features get computed
-    # at once per worker, independent of instance size.
-    worker_memory="32GiB",
-    worker_options={"nthreads": 1},
-    # Workers hit a 100%-repro UnicodeDecodeError inside pyproj's PROJ log
-    # callback on every WGS84->NAD83 transform (byte 0x80 at the same offset
-    # regardless of the bbox), which corrupts the transform into returning
-    # inf instead of raising cleanly. That matches PROJ emitting a non-UTF8
-    # warning (commonly a degree symbol) when no locale is set, which the
-    # miniforge base image doesn't set by default -- force one.
-    environ={"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
-)
-
-client = cluster.get_client()
-client.upload_file("src/create_buffered_tile.py")
-client.upload_file("src/calculate_point_features.py")
 
 
 ############################################################
@@ -236,25 +229,25 @@ def process(stac_item):
 #                         RUN LOOP                        #
 ############################################################
 
-futures = {}
-for _, row in df.iterrows():
-    future = client.submit(process, row['id'])
-    futures[future] = row['id']
-
-# client.gather(futures) raises on the first cancelled/errored future and
-# discards every other result along with it -- a single dead worker would
-# lose the whole batch's output. Gather each future individually instead so
-# one bad task only costs its own row.
+# Sequential, one tile at a time -- no client.submit/futures, no Dask. See
+# the module-level comment for why (memory, not speed). process() already
+# catches its own exceptions and returns an "error" row rather than
+# raising, so this try/except is just a backstop for anything that
+# genuinely escapes it (e.g. a KeyboardInterrupt mid-tile shouldn't lose
+# every result gathered so far).
 results = []
-for future, item_id in futures.items():
+for _, row in df.iterrows():
+    item_id = row['id']
     try:
-        results.append(future.result())
+        results.append(process(item_id))
     except Exception as e:
-        print(f'ERROR gathering {item_id}: {e}')
+        print(f'ERROR processing {item_id}: {e}')
         results.append((item_id, "error", str(e)))
 
 results_df = pd.DataFrame(results, columns=["item_id", "status", "error"])
-local_path = Path(tempfile.gettempdir()) / "future_results.parquet"
+local_path = Path(tempfile.gettempdir()) / "future_results_local.parquet"
 results_df.to_parquet(local_path)
-upload_to_s3(local_path, S3_BUCKET, "phase2/future_results.parquet")
+# _local suffix: keeps this run's summary from clobbering the Coiled run's
+# phase2/future_results.parquet, since both may be active at once.
+upload_to_s3(local_path, S3_BUCKET, "phase2/future_results_local.parquet")
 local_path.unlink()

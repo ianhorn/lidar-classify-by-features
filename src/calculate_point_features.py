@@ -9,6 +9,7 @@
 ############################################################
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -17,6 +18,10 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pdal
+
+# Opt-in only, via an env var the Coiled branch never sets -- unset here
+# means the existing workers=-1 behavior (all cores) is unchanged there.
+_KDTREE_WORKERS = int(os.environ.get("LIDAR_LOCAL_MAX_WORKERS", -1))
 from scipy.spatial import cKDTree
 from shapely import contains_xy
 
@@ -94,7 +99,7 @@ def compute_geometric_features_vectorized(tree, xyz, radius, min_neighbors=5, ch
         n_chunk = len(chunk_idx)
 
         # Batched, parallel radius search for the whole chunk
-        neighbor_lists = tree.query_ball_point(chunk_xyz, r=radius, workers=-1)
+        neighbor_lists = tree.query_ball_point(chunk_xyz, r=radius, workers=_KDTREE_WORKERS)
         lengths = np.fromiter((len(nb) for nb in neighbor_lists), dtype=np.int64, count=n_chunk)
         valid = lengths >= min_neighbors
 
