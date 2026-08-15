@@ -1,36 +1,48 @@
 #!/usr/bin/env python3
 
 ############################################################
-#               RUN DATAFRAME LOCALLY, SEQUENTIALLY       #
+#        RUN DATAFRAME LOCALLY, CONCURRENT (mapcache)      #
 ############################################################
 
-# No Coiled/Dask here -- this branch runs on a single local machine instead
-# of a cloud cluster, since Coiled credits run out after ~20 hours/month.
-# process() is unchanged from the Coiled version: it was already
-# environment-agnostic (plain boto3 S3 calls, relative local paths, no
-# Coiled-specific code inside it), so nothing about *how a tile gets
-# processed* needed to change -- only how tiles get scheduled.
+# Windows server: 32 cores / 64 threads, 256GB RAM. Unlike the laptop/
+# cold-harbor-pc branches (sequential -- not enough RAM to safely run more
+# than one tile at a time), this machine has enough headroom to run
+# several tiles concurrently. process() itself is still completely
+# unchanged from every other branch -- it was already environment-agnostic
+# (plain boto3 S3 calls, relative local paths, no Coiled-specific code
+# inside it) -- only how tiles get scheduled differs here.
 #
-# Sequential on purpose, not a local process pool: a single tile's feature
-# computation was measured peaking at ~23GiB RAM on Coiled (one of the
-# denser buffered tiles, ~33M points). Running more than one of those
-# concurrently on a 32GB machine risks OOM with no equivalent to Dask's
-# pause/resume memory manager to catch it locally. DuckDB and NumPy/OpenBLAS
-# already parallelize across all local cores on their own for a single tile
-# (confirmed: DuckDB's default thread count and OpenBLAS both already use
-# all 24 cores here without any config from us), so going sequential doesn't
-# leave meaningful speed on the table -- it's a memory-safety choice, not a
-# parallelism tradeoff.
-
-# Cap at 20 of this machine's 24 cores, reserving 4 so the computer stays
-# usable for everything else while this runs for hours. Must be set before
-# numpy/create_buffered_tile/calculate_point_features are imported --
-# OpenBLAS reads OPENBLAS_NUM_THREADS at first use, and
-# calculate_point_features reads LIDAR_LOCAL_MAX_WORKERS at import time.
+# Hard requirement: never exceed 75% of either RAM or CPU capacity.
+#   75% of 256GB = 192GB RAM budget
+#   75% of 64 threads = 48 thread budget
+#
+# MAX_WORKERS=6 concurrent processes: 6 * ~23GiB (the largest single-tile
+# feature-computation peak measured so far, on Coiled, ~33M points) = 138GB,
+# leaving ~54GB of slack under the 192GB budget for tiles denser than
+# anything seen yet -- deliberately not pushed to the theoretical ceiling
+# of 8 (192/23), since 23GB was the largest tile observed across a partial
+# run, not a guaranteed maximum. 48 threads / 6 workers = 8 threads
+# reserved for each tile's own DuckDB/OpenBLAS/KDTree parallelism.
+#
+# That static cap alone assumes every concurrent tile is "typical" -- if
+# several unusually dense tiles happen to land together, real usage could
+# still spike past 75%. wait_for_capacity() is a second, dynamic layer:
+# before starting any *new* tile (not just the initial batch), check real
+# system RAM/CPU via psutil and pause -- not crash -- if either is already
+# at or above 75%, instead of relying solely on the static process count.
 import os
-os.environ["OPENBLAS_NUM_THREADS"] = "20"
-os.environ["OMP_NUM_THREADS"] = "20"
-os.environ["LIDAR_LOCAL_MAX_WORKERS"] = "20"
+
+MAX_WORKERS = 6
+THREADS_PER_TILE = 8
+MAX_RAM_PERCENT = 75.0
+MAX_CPU_PERCENT = 75.0
+
+# Must be set before numpy/create_buffered_tile/calculate_point_features are
+# imported -- OpenBLAS reads OPENBLAS_NUM_THREADS at first use, and
+# calculate_point_features reads LIDAR_LOCAL_MAX_WORKERS at import time.
+os.environ["OPENBLAS_NUM_THREADS"] = str(THREADS_PER_TILE)
+os.environ["OMP_NUM_THREADS"] = str(THREADS_PER_TILE)
+os.environ["LIDAR_LOCAL_MAX_WORKERS"] = str(THREADS_PER_TILE)
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -38,11 +50,12 @@ import pandas as pd
 from pathlib import Path
 import create_buffered_tile as cbt
 import calculate_point_features as cpf
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 
 import tempfile
 import boto3
+import psutil
 import time
 from botocore.exceptions import ClientError
 
@@ -68,17 +81,34 @@ def s3_object_exists(bucket, key):
         raise
 
 
+def wait_for_capacity(max_ram_percent=MAX_RAM_PERCENT, max_cpu_percent=MAX_CPU_PERCENT, poll_seconds=10):
+    """
+    Block starting a new tile until both whole-machine RAM and CPU are
+    under the 75% ceiling. Dynamic backstop on top of the static
+    MAX_WORKERS cap -- see module docstring.
+    """
+
+    while True:
+        ram_percent = psutil.virtual_memory().percent
+        cpu_percent = psutil.cpu_percent(interval=1)
+        if ram_percent < max_ram_percent and cpu_percent < max_cpu_percent:
+            return
+        print(f"WARNING: at capacity (RAM {ram_percent:.0f}%, CPU {cpu_percent:.0f}%), waiting before starting next tile")
+        time.sleep(poll_seconds)
+
+
 start_time = time.time()
 # Local copy, not S3 -- avoids re-downloading the same 1.9MB file every run,
 # and lets this run fully offline apart from the actual STAC/S3/Overture
 # calls inside process(). Same file, just already sitting at the repo root.
 df = pd.read_parquet('stac_item_list.parquet')
 
-# The Coiled run (still active separately) works through df top-down.
-# Reversing here means this local run starts from the opposite end, so the
-# two converge toward the middle instead of one redoing the other's work --
-# though the S3 skip-check in process() would catch that anyway.
-df = df.iloc[::-1]
+# Where this machine should start in the list (vs. Coiled/laptop/
+# cold-harbor-pc, which each start from a different point so they don't
+# pile onto the same tiles) hasn't been decided yet -- deferred for now.
+# Plain top-down order in the meantime; the S3 skip-check in process()
+# makes that safe either way, just possibly redundant with the others
+# until this gets tuned too.
 df.shape
 
 
@@ -229,25 +259,60 @@ def process(stac_item):
 #                         RUN LOOP                        #
 ############################################################
 
-# Sequential, one tile at a time -- no client.submit/futures, no Dask. See
-# the module-level comment for why (memory, not speed). process() already
+# Bounded concurrency via ProcessPoolExecutor -- MAX_WORKERS caps how many
+# tiles run at once, and wait_for_capacity() gates every new submission
+# (not just the initial batch), so RAM/CPU get rechecked continuously
+# through the whole 45k-tile run, not just at the start. process() already
 # catches its own exceptions and returns an "error" row rather than
-# raising, so this try/except is just a backstop for anything that
-# genuinely escapes it (e.g. a KeyboardInterrupt mid-tile shouldn't lose
-# every result gathered so far).
-results = []
-for _, row in df.iterrows():
-    item_id = row['id']
-    try:
-        results.append(process(item_id))
-    except Exception as e:
-        print(f'ERROR processing {item_id}: {e}')
-        results.append((item_id, "error", str(e)))
+# raising, so future.result()'s try/except is just a backstop for anything
+# that genuinely escapes it.
+#
+# if __name__ == '__main__' is required here, not optional: on Windows,
+# ProcessPoolExecutor uses spawn (not fork), which re-imports this module
+# in every child process. Without the guard, each child would re-run this
+# entire submission loop itself, recursively spawning its own pool.
+if __name__ == '__main__':
+    results = []
+    row_iter = df.iterrows()
 
-results_df = pd.DataFrame(results, columns=["item_id", "status", "error"])
-local_path = Path(tempfile.gettempdir()) / "future_results_local.parquet"
-results_df.to_parquet(local_path)
-# _local suffix: keeps this run's summary from clobbering the Coiled run's
-# phase2/future_results.parquet, since both may be active at once.
-upload_to_s3(local_path, S3_BUCKET, "phase2/future_results_local.parquet")
-local_path.unlink()
+    def submit_next(executor):
+        try:
+            _, row = next(row_iter)
+        except StopIteration:
+            return None
+        wait_for_capacity()
+        item_id = row['id']
+        return executor.submit(process, item_id), item_id
+
+    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        pending = {}  # future -> item_id
+
+        for _ in range(MAX_WORKERS):
+            submitted = submit_next(executor)
+            if submitted is None:
+                break
+            future, item_id = submitted
+            pending[future] = item_id
+
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                item_id = pending.pop(future)
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    print(f'ERROR processing {item_id}: {e}')
+                    results.append((item_id, "error", str(e)))
+
+                submitted = submit_next(executor)
+                if submitted is not None:
+                    new_future, new_item_id = submitted
+                    pending[new_future] = new_item_id
+
+    results_df = pd.DataFrame(results, columns=["item_id", "status", "error"])
+    local_path = Path(tempfile.gettempdir()) / "future_results_mapcache.parquet"
+    results_df.to_parquet(local_path)
+    # _mapcache suffix: keeps this run's summary from clobbering the
+    # other branches' results files, since several may be active at once.
+    upload_to_s3(local_path, S3_BUCKET, "phase2/future_results_mapcache.parquet")
+    local_path.unlink()
