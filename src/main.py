@@ -16,24 +16,29 @@
 #   75% of 256GB = 192GB RAM budget
 #   75% of 64 threads = 48 thread budget
 #
-# MAX_WORKERS=6 concurrent processes: 6 * ~23GiB (the largest single-tile
-# feature-computation peak measured so far, on Coiled, ~33M points) = 138GB,
-# leaving ~54GB of slack under the 192GB budget for tiles denser than
-# anything seen yet -- deliberately not pushed to the theoretical ceiling
-# of 8 (192/23), since 23GB was the largest tile observed across a partial
-# run, not a guaranteed maximum. 48 threads / 6 workers = 8 threads
-# reserved for each tile's own DuckDB/OpenBLAS/KDTree parallelism.
+# Original sizing (MAX_WORKERS=6, THREADS_PER_TILE=8 -- 6 * ~23GiB largest
+# measured single-tile peak = 138GB, under the 192GB budget) turned out very
+# conservative in practice: real observed usage sat at 15-22% CPU/RAM, far
+# under the 75% ceiling. Most of a tile's wall-clock time is network-bound
+# (STAC lookups, S3 downloads/uploads), not CPU-bound, so 6 concurrent tiles
+# rarely had more than a couple actually in the CPU-heavy feature-computation
+# phase at once. Raised MAX_WORKERS to increase the odds more tiles overlap
+# during their CPU-heavy phase, and correspondingly lowered THREADS_PER_TILE
+# since each individual tile needs less of its own dedicated thread budget
+# once more tiles are running concurrently: 16 * 4 = 64 threads at full
+# theoretical saturation (the physical limit, not the 75%/48-thread budget)
+# -- wait_for_capacity() (below) is what actually enforces the 75% ceiling
+# in practice, not this static cap, so it's fine for the cap's theoretical
+# max to exceed the budget on paper.
 #
-# That static cap alone assumes every concurrent tile is "typical" -- if
-# several unusually dense tiles happen to land together, real usage could
-# still spike past 75%. wait_for_capacity() is a second, dynamic layer:
-# before starting any *new* tile (not just the initial batch), check real
-# system RAM/CPU via psutil and pause -- not crash -- if either is already
-# at or above 75%, instead of relying solely on the static process count.
+# wait_for_capacity() is a dynamic layer: before starting any *new* tile
+# (not just the initial batch), check real system RAM/CPU via psutil and
+# pause -- not crash -- if either is already at or above 75%, instead of
+# relying solely on the static process count to stay under budget.
 import os
 
-MAX_WORKERS = 6
-THREADS_PER_TILE = 8
+MAX_WORKERS = 16
+THREADS_PER_TILE = 4
 MAX_RAM_PERCENT = 75.0
 MAX_CPU_PERCENT = 75.0
 
