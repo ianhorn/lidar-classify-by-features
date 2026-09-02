@@ -23,6 +23,12 @@ import pandas as pd
 S3_BUCKET = "lidar-classification"
 
 
+def upload_to_s3(local_path, bucket, key):
+    s3 = boto3.client("s3")
+    s3.upload_file(str(local_path), bucket, key)
+    print(f"uploaded {local_path} to s3://{bucket}/{key}")
+
+
 def list_keys(bucket, prefix):
     s3 = boto3.client("s3")
     paginator = s3.get_paginator("list_objects_v2")
@@ -61,6 +67,14 @@ def main():
 
     todo_df.to_parquet(output_path, compression="zstd")
     print(f"wrote {len(todo_df):,} rows to {output_path}")
+
+    # main.py reads the todo list from here, not the local file, so a
+    # refresh isn't picked up by the next run until this upload happens.
+    upload_to_s3(output_path, S3_BUCKET, "phase2/stac_item_list.parquet")
+
+    # Machine-parseable line for scripts (e.g. the continuous-run orchestrator)
+    # that need the count without parsing the comma-formatted prose above.
+    print(f"REMAINING_COUNT={len(todo_df)}")
 
 
 if __name__ == "__main__":
