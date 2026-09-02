@@ -87,9 +87,9 @@ cluster = Cluster(
     no_client_timeout="12 hours",
     # Hard cap on this session regardless of activity -- unlike
     # no_client_timeout (which only fires after the client disconnects),
-    # this shuts the cluster down at 4.5 hours even while it's actively
+    # this shuts the cluster down at 12 hours even while it's actively
     # working, so a run can't be forgotten and left billing indefinitely.
-    cluster_timeout="4.5 hours",
+    cluster_timeout="12 hours",
     # Workers were getting killed by Dask's own memory manager mid-tile
     # (hit 80% of the default m6i.xlarge's 16GiB during feature computation
     # on dense tiles, e.g. one buffered tile alone had ~15.8M points) --
