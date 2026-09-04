@@ -15,6 +15,19 @@ Resume support mirrors src/main.py: a tile whose classified output
 already exists on S3 is skipped unless --overwrite is passed, so a
 re-run over the same tile list doesn't redo completed work.
 
+IsBuildingML also requires HAG > --hag-floor (default 2ft), on top of
+the model's own >=0.5 probability cutoff. Measured on a 30-tile/511.6M
+point sample: model_only false positives (points the model flags as
+building but WithinFootprint disagrees) are disproportionately at or
+near ground level -- unsurprising once you consider HAG's ground TIN is
+itself built from Classification==2 points, so a literal ground point's
+HAG is already ~0 by construction. The floor cut total flagged-building
+volume ~41% (2.82% -> 1.66% of points) and *improved* footprint
+agreement (97.50% -> 98.59%) on every one of those 30 tiles, no
+exceptions -- cheap, no-retraining precision gain. It doesn't fix the
+underlying cause (SurfaceVariation reacting to rough/disturbed ground
+texture), just filters out its most obvious symptom.
+
 This reads every row of every tile (no sampling, unlike training), so at
 the throughput measured locally (~100 tiles/108min with 3 concurrent
 workers) a full 38,000+ tile run would take on the order of 1-2 weeks on
@@ -42,9 +55,10 @@ CONTEXT_COLUMNS = ["X", "Y", "Z", "Classification", "WithinFootprint"]
 
 DEFAULT_MODEL_PATH = "scripts/building_classifier.json"
 DEFAULT_WORKERS = 3  # I/O bound, but each in-flight tile can run multiple GB -- see train_building_classifier.py
+DEFAULT_HAG_FLOOR = 2.0  # feet -- see module docstring for why
 
 
-def classify_tile(key, model, overwrite):
+def classify_tile(key, model, overwrite, hag_floor):
     """
     Read one tile's features from S3, score every point, and upload a
     parquet with the context columns plus BuildingProbability/IsBuildingML
@@ -65,7 +79,7 @@ def classify_tile(key, model, overwrite):
 
     proba = model.predict_proba(df[FEATURE_COLUMNS])[:, 1]
     df["BuildingProbability"] = proba
-    df["IsBuildingML"] = proba >= 0.5
+    df["IsBuildingML"] = (proba >= 0.5) & (df["HAG"] > hag_floor)
 
     # Quick eyeball stats, computed here while the data's already in
     # memory rather than a separate re-read of the uploaded output.
@@ -96,6 +110,8 @@ def main():
     parser.add_argument("--overwrite", action="store_true", help="reclassify tiles that already have output on S3")
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument("--hag-floor", type=float, default=DEFAULT_HAG_FLOOR,
+                         help="require HAG above this (feet) for IsBuildingML, on top of the model's probability cutoff")
     args = parser.parse_args()
 
     model = xgb.XGBClassifier()
@@ -113,7 +129,7 @@ def main():
     start = time.perf_counter()
     results = []
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(classify_tile, key, model, args.overwrite): key for key in keys}
+        futures = {executor.submit(classify_tile, key, model, args.overwrite, args.hag_floor): key for key in keys}
         for future in as_completed(futures):
             key = futures[future]
             tile_id = tile_id_from_key(key)
