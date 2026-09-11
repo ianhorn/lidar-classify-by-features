@@ -30,6 +30,12 @@ separate step, not part of this script.
 Resume support: a tile whose features parquet already has a ReturnNumber
 column is skipped unless --overwrite is passed, so a re-run over the same
 tile list doesn't redo completed work.
+
+--shard-index/--num-shards (see common.py's add_shard_args/shard_keys) split
+the tile list into disjoint chunks for running this as an AWS Batch array
+job -- see docker/Dockerfile. --shard-index defaults to
+$AWS_BATCH_JOB_ARRAY_INDEX so a job definition's command doesn't need to
+interpolate it.
 """
 
 import argparse
@@ -43,7 +49,7 @@ import boto3
 import pandas as pd
 import pdal
 
-from common import S3_BUCKET, list_feature_tiles, tile_id_from_key, upload_to_s3
+from common import S3_BUCKET, add_shard_args, list_feature_tiles, shard_keys, tile_id_from_key, upload_to_s3
 
 LAZ_PREFIX = "phase2/laz/"
 DEFAULT_WORKERS = 3  # each in-flight tile's parquet can run multiple GB -- see train_building_classifier.py
@@ -97,6 +103,7 @@ def main():
     parser.add_argument("--n-tiles", type=int, default=None, help="backfill only the first N tiles (for testing)")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--overwrite", action="store_true", help="reprocess tiles that already have ReturnNumber")
+    add_shard_args(parser)
     args = parser.parse_args()
 
     print("listing feature tiles in S3...")
@@ -106,6 +113,10 @@ def main():
     if args.n_tiles is not None:
         keys = keys[: args.n_tiles]
         print(f"limiting to first {len(keys)} tiles for this run")
+
+    keys = shard_keys(keys, args.shard_index, args.num_shards)
+    if args.shard_index is not None:
+        print(f"shard {args.shard_index}/{args.num_shards}: {len(keys)} tiles")
 
     start = time.perf_counter()
     ok = skipped = errors = 0

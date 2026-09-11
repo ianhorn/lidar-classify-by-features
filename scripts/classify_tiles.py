@@ -33,7 +33,11 @@ the throughput measured locally (~100 tiles/108min with 3 concurrent
 workers) a full 38,000+ tile run would take on the order of 1-2 weeks on
 a single machine. classify_tile() below is written to be reusable as-is
 inside a Coiled/Dask submit() call the same way src/main.py's process()
-is, for exactly that reason.
+is, for exactly that reason -- or, see docker/Dockerfile, as an AWS Batch
+array job: --shard-index/--num-shards (common.py's add_shard_args/
+shard_keys) split the tile list into disjoint chunks, one per array child,
+with --shard-index defaulting to $AWS_BATCH_JOB_ARRAY_INDEX so a job
+definition's command doesn't need to interpolate it.
 """
 
 import argparse
@@ -46,7 +50,16 @@ from pathlib import Path
 import pandas as pd
 import xgboost as xgb
 
-from common import FEATURE_COLUMNS, S3_BUCKET, list_feature_tiles, s3_object_exists, tile_id_from_key, upload_to_s3
+from common import (
+    FEATURE_COLUMNS,
+    S3_BUCKET,
+    add_shard_args,
+    list_feature_tiles,
+    s3_object_exists,
+    shard_keys,
+    tile_id_from_key,
+    upload_to_s3,
+)
 
 CLASSIFIED_PREFIX = "phase2/classified/"
 
@@ -112,6 +125,7 @@ def main():
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--hag-floor", type=float, default=DEFAULT_HAG_FLOOR,
                          help="require HAG above this (feet) for IsBuildingML, on top of the model's probability cutoff")
+    add_shard_args(parser)
     args = parser.parse_args()
 
     model = xgb.XGBClassifier()
@@ -125,6 +139,10 @@ def main():
     if args.n_tiles is not None:
         keys = random.Random(args.random_state).sample(keys, min(args.n_tiles, len(keys)))
         print(f"sampled {len(keys)} tiles for this run")
+
+    keys = shard_keys(keys, args.shard_index, args.num_shards)
+    if args.shard_index is not None:
+        print(f"shard {args.shard_index}/{args.num_shards}: {len(keys)} tiles")
 
     start = time.perf_counter()
     results = []
@@ -161,9 +179,19 @@ def main():
         results,
         columns=["tile_id", "status", "building_fraction", "mean_probability", "footprint_agreement", "error"],
     )
+    # Per-shard filename when sharded -- every array-job child would
+    # otherwise upload to the same fixed key and clobber each other's
+    # results. results_prefix.py or similar can concatenate these later;
+    # nothing currently reads classify_results.parquet back in besides a
+    # human eyeballing it.
+    results_key = (
+        f"phase2/classify_results/shard_{args.shard_index}_of_{args.num_shards}.parquet"
+        if args.shard_index is not None
+        else "phase2/classify_results.parquet"
+    )
     local_path = Path(tempfile.gettempdir()) / "classify_results.parquet"
     results_df.to_parquet(local_path)
-    upload_to_s3(local_path, S3_BUCKET, "phase2/classify_results.parquet")
+    upload_to_s3(local_path, S3_BUCKET, results_key)
     local_path.unlink()
 
 

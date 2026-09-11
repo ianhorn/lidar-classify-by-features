@@ -8,6 +8,8 @@ position), but because the *set* must match exactly, or predict() raises
 on an unseen/missing column.
 """
 
+import os
+
 import boto3
 from botocore.exceptions import ClientError
 
@@ -73,3 +75,45 @@ def upload_to_s3(local_path, bucket, key):
 
 def tile_id_from_key(key):
     return key.rsplit("/", 1)[-1].removesuffix(".parquet")
+
+
+def add_shard_args(parser):
+    """
+    --shard-index/--num-shards split a tile-key list into disjoint chunks --
+    the pattern an AWS Batch array job needs, where each array child
+    processes one shard instead of the whole list in one process.
+    shard-index defaults to $AWS_BATCH_JOB_ARRAY_INDEX (which Batch sets
+    automatically in every array-job container) so a job definition's
+    command doesn't need to interpolate it manually. num-shards still has
+    to be passed explicitly -- Batch doesn't expose a child's own array
+    size to it, only whoever submits the array job knows that.
+    """
+
+    parser.add_argument(
+        "--shard-index", type=int,
+        default=int(os.environ["AWS_BATCH_JOB_ARRAY_INDEX"]) if "AWS_BATCH_JOB_ARRAY_INDEX" in os.environ else None,
+        help="which shard this run processes (0-based); defaults to $AWS_BATCH_JOB_ARRAY_INDEX if set",
+    )
+    parser.add_argument("--num-shards", type=int, default=None,
+                         help="total number of shards (must match the Batch array size)")
+
+
+def shard_keys(keys, shard_index, num_shards):
+    """
+    Split keys into num_shards disjoint, deterministic pieces and return
+    shard_index's piece (or all of keys if sharding wasn't requested).
+    Round-robin (keys[i::n]) rather than contiguous blocks so shards land
+    roughly balanced even though key order correlates with geography (tile
+    id), not file size -- a contiguous block could otherwise land a run of
+    unusually large/small tiles all in one shard. Sorted explicitly here
+    rather than trusting caller order, so sharding is deterministic even if
+    S3 listing order ever isn't.
+    """
+
+    if (shard_index is None) != (num_shards is None):
+        raise ValueError("--shard-index and --num-shards must be given together")
+    if shard_index is None:
+        return keys
+    if not (0 <= shard_index < num_shards):
+        raise ValueError(f"--shard-index {shard_index} out of range for --num-shards {num_shards}")
+    return sorted(keys)[shard_index::num_shards]
