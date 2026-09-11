@@ -1,0 +1,17 @@
+name: lidar-classification
+channels:
+  - conda-forge
+dependencies:
+  - boto3
+  - geopandas
+  - numpy
+  - pandas
+  - pdal
+  - pyarrow
+  - scikit-learn
+  - scipy
+  - shapely
+  # unpinned so conda-forge's __cuda virtual package detection picks the
+  # GPU-enabled build against the CUDA runtime baked into this image --
+  # see the Dockerfile's nvidia/cuda base
+  - xgboost
