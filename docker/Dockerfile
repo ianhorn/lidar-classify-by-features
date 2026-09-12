@@ -17,6 +17,13 @@ FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 ENV MAMBA_ROOT_PREFIX=/opt/conda
 ENV PATH=/opt/conda/envs/lidar-classification/bin:$PATH
+# Without this, Python block-buffers stdout when it isn't a real terminal
+# (true for a container's log capture) -- a clean exit flushes everything
+# printed, but an abrupt crash (a SIGSEGV from PDAL's C++ layer, e.g.) loses
+# whatever was still sitting in the buffer. Cost this a wasted debugging
+# pass on a run_phase1_batch.py shard that crashed 3 times with no log
+# output showing which tile it was on.
+ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl bzip2 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
