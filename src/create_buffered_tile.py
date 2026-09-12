@@ -73,17 +73,32 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
     file and silently undercounts the tile, since `crop_copc` only fails
     hard if every href fails; a partial read failure otherwise never
     surfaces as an error.
+
+    readers.copc needs a well-formed COPC VLR (the octree/spatial-index
+    structure) to do its bounded, indexed read -- a source file that's
+    mislabeled or otherwise not a real COPC despite its extension fails
+    there with a VLR-related error. On that specific failure, switch to
+    readers.las + filters.crop for the remaining attempts: readers.las
+    reads the file as plain LAS/LAZ with no COPC VLR requirement at all,
+    at the cost of a full linear read instead of COPC's indexed one.
     """
 
-    pipeline = {
-        "pipeline": [
-            {"type": "readers.copc", "filename": href, "bounds": bounds},
-            {"type": "writers.las", "filename": str(out_path)},
-        ]
-    }
+    def build_pipeline(use_las_fallback):
+        if use_las_fallback:
+            reader = {"type": "readers.las", "filename": href}
+            crop = {"type": "filters.crop", "bounds": bounds}
+            return {"pipeline": [reader, crop, {"type": "writers.las", "filename": str(out_path)}]}
+        return {
+            "pipeline": [
+                {"type": "readers.copc", "filename": href, "bounds": bounds},
+                {"type": "writers.las", "filename": str(out_path)},
+            ]
+        }
 
     last_err = ""
+    use_las_fallback = False
     for attempt in range(1, retries + 1):
+        pipeline = build_pipeline(use_las_fallback)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(pipeline, f)
             pipeline_path = f.name
@@ -107,6 +122,10 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
 
         if result is not None:
             last_err = result.stderr
+            if not use_las_fallback and "vlr" in last_err.lower():
+                use_las_fallback = True
+                print(f"WARNING: {href} failed with a VLR-related error under readers.copc, "
+                      f"switching to readers.las+filters.crop")
 
         if attempt < retries:
             print(f"WARNING: attempt {attempt}/{retries} failed for {href} ({last_err.strip()[:200]}), retrying")
