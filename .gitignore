@@ -234,3 +234,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml*.ddb
 *.ddb
+
+aws-notes*
+setup-commands.sh
