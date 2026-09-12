@@ -3,11 +3,15 @@ channels:
   - conda-forge
 dependencies:
   - boto3
+  - duckdb
   - geopandas
   - numpy
   - pandas
   - pdal
   - pyarrow
+  - pystac
+  - pystac-client
+  - requests
   - scikit-learn
   - scipy
   - shapely
