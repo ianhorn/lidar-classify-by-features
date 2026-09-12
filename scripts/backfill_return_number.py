@@ -56,13 +56,28 @@ DEFAULT_WORKERS = 3  # each in-flight tile's parquet can run multiple GB -- see 
 
 
 def read_return_fields(tile_id):
-    """Read ReturnNumber/NumberOfReturns for one tile straight off S3, no local download."""
+    """
+    Read ReturnNumber/NumberOfReturns for one tile straight off S3, no local
+    download. The /vsicurl/ prefix is required, not cosmetic -- a bare
+    https:// URL works for readers.las on a *short* presigned URL (e.g.
+    signed with long-lived credentials), but AWS Batch job roles sign with
+    temporary STS credentials, whose embedded x-amz-security-token makes the
+    URL ~1000 chars. Without /vsicurl/, PDAL's URL handling breaks down on
+    a URL that long and fails with a nonsensical "could not open <url> for
+    writing" error, as if it fell back to treating the whole URL string as
+    a local path. /vsicurl/ forces GDAL's actual remote-file handler
+    instead of whatever implicit detection readers.las does on a bare
+    string, and reads correctly regardless of URL length. Verified locally
+    against both a short (long-lived-credential) and long (session-token)
+    presigned URL -- reproduced the failure with the long one, confirmed
+    /vsicurl/ fixes it, before this was in production.
+    """
 
     s3 = boto3.client("s3")
     url = s3.generate_presigned_url(
         "get_object", Params={"Bucket": S3_BUCKET, "Key": f"{LAZ_PREFIX}{tile_id}.laz"}, ExpiresIn=900
     )
-    pipeline = pdal.Pipeline(json.dumps({"pipeline": [{"type": "readers.las", "filename": url}]}))
+    pipeline = pdal.Pipeline(json.dumps({"pipeline": [{"type": "readers.las", "filename": f"/vsicurl/{url}"}]}))
     pipeline.execute()
     arr = pipeline.arrays[0]
     return arr["ReturnNumber"], arr["NumberOfReturns"]
