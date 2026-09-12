@@ -235,3 +235,7 @@ __marimo__/
 .streamlit/secrets.toml*.ddb
 *.ddb
 *.ddb
+
+# Personal AWS setup notes -- a record of live infra state, not code the
+# repo depends on
+aws-notes/
