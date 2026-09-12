@@ -62,7 +62,16 @@ def main():
     }
     print(f"{len(problematic_ids):,} tiles flagged problematic")
 
-    todo_df = full_df[~full_df["id"].isin(processed_ids | problematic_ids)].reset_index(drop=True)
+    # run_phase1_batch.py (and main.py's process()) normalize copz->copc for
+    # every S3 output key, so a tile whose catalog id has "copz" in it shows
+    # up here under its .copc-normalized name even though full_df["id"]
+    # still has the original .copz form -- comparing the raw id against
+    # processed_ids/problematic_ids would incorrectly mark already-done copz
+    # tiles as still remaining. Confirmed in production: 36 of an apparent
+    # 447 "remaining" tiles were already fully done under their normalized
+    # name.
+    normalized_id = full_df["id"].str.replace("copz", "copc", regex=False)
+    todo_df = full_df[~normalized_id.isin(processed_ids | problematic_ids)].reset_index(drop=True)
     print(f"{len(todo_df):,} remaining after excluding processed + laz-problematic/")
 
     todo_df.to_parquet(output_path, compression="zstd")
