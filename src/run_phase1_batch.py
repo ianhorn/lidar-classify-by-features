@@ -180,8 +180,18 @@ def main():
             item_id, status, error = process_tile(item_id)
             print(f"{item_id}: {status}")
         except Exception as e:
-            print(f"ERROR processing {item_id}: {e}")
-            status, error = "error", str(e)
+            # Full traceback, not just str(e) -- the UnicodeDecodeError
+            # showing up across many tiles has so far resisted every fix
+            # targeted at pystac's STAC API fetches (get_stac_item,
+            # search_stac), with zero change in rate -- meaning it's
+            # coming from somewhere else in process_tile() entirely (e.g.
+            # get_buffered_tile_footprints()'s DuckDB query against
+            # Overture's S3 bucket, a completely different network path).
+            # A file/line pinpoints it instead of guessing again.
+            import traceback
+            tb = traceback.format_exc()
+            print(f"ERROR processing {item_id}: {e}\n{tb}")
+            status, error = "error", f"{e}\n{tb}"
         results.append((item_id, status, error))
 
     elapsed = time.perf_counter() - start
