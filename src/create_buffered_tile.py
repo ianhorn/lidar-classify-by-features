@@ -121,12 +121,24 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
 
         try:
             try:
+                # capture_output as raw bytes, not text=True -- PDAL's C++
+                # error messages for a genuinely bad source href (an
+                # ArbiterError like the NoSuchKey/InvalidRange failures
+                # already seen in laz-problematic/ manifests) can contain a
+                # raw non-UTF8 byte. text=True's automatic strict-UTF8
+                # decode then raises UnicodeDecodeError *inside*
+                # subprocess.run() itself -- before this function's own
+                # retry/quarantine logic ever runs, escaping this try block
+                # entirely. Root-caused in production: this was
+                # misdiagnosed twice as a STAC-API fetch problem (fixing
+                # get_stac_item/search_stac had zero effect) before a
+                # direct traceback showed the real crash site was here.
                 result = subprocess.run(
                     ["pdal", "pipeline", pipeline_path],
                     capture_output=True,
-                    text=True,
                     timeout=300,
                 )
+                result.stderr = result.stderr.decode("utf-8", errors="replace")
             except subprocess.TimeoutExpired:
                 last_err = "timed out after 300s"
                 result = None
