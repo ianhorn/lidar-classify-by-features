@@ -22,10 +22,26 @@ from datetime import datetime, timezone
 from pystac import Item
 from pathlib import Path
 from pystac_client import Client
+from pystac_client.stac_api_io import StacApiIO
 from concurrent.futures import ThreadPoolExecutor
 
 
 S3_BUCKET = "lidar-classification"
+
+
+class RequestsStacApiIO(StacApiIO):
+    """
+    StacApiIO inherits read_text_from_href unchanged from pystac's
+    DefaultStacIO -- see search_stac's docstring. Routes it through the
+    same requests.Session StacApiIO.request() already uses, instead of the
+    raw urllib3.PoolManager().request(preload_content=False) + manual
+    f.read().decode("utf-8") that DefaultStacIO uses for plain reads.
+    """
+
+    def read_text_from_href(self, href: str) -> str:
+        response = self.session.get(href, timeout=self.timeout)
+        response.raise_for_status()
+        return response.text
 
 
 def upload_to_s3(local_path, bucket, key):
@@ -277,12 +293,18 @@ def search_stac(stac_api: str, collection: str, buffered_bbox, retries=3, backof
     search by bbox
     return a list of hrefs
 
-    Retries on a UnicodeDecodeError -- same intermittent failure as
-    get_stac_item (see its docstring), on the search response instead of a
-    single-item fetch.
+    Client.open() fetches the STAC API's landing page via StacApiIO.
+    read_text_from_href -- inherited unchanged from pystac's DefaultStacIO,
+    the same raw-urllib3-read path documented in get_stac_item's docstring.
+    (StacApiIO.request(), used for client.search()'s actual pagination
+    calls, already correctly uses requests/self.session -- confirmed via
+    StacApiIO's source: it defines request() but not
+    read_text_from_href(), so Client.open() alone was still hitting the
+    broken path.) RequestsStacApiIO overrides just that one inherited
+    method to route through the same session instead.
     """
 
-    client = Client.open(f'{stac_api}/')
+    client = Client.open(f'{stac_api}/', stac_io=RequestsStacApiIO())
     search = client.search(
         max_items=10,
         collections=collection,
