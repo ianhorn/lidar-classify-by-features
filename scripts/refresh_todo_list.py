@@ -62,6 +62,17 @@ def main():
     }
     print(f"{len(problematic_ids):,} tiles flagged problematic")
 
+    # Permanently unprocessable tiles (e.g. water-only tiles with zero
+    # ground points -- no ground TIN, no HAG, no amount of retrying fixes
+    # it), as opposed to laz-problematic/'s transient bad-source-href
+    # failures. See run_phase1_batch.py's report_unprocessable().
+    unprocessable_ids = {
+        Path(k).name.removesuffix("_unprocessable.parquet")
+        for k in list_keys(S3_BUCKET, "phase2/laz-unprocessable/")
+        if k.endswith("_unprocessable.parquet")
+    }
+    print(f"{len(unprocessable_ids):,} tiles flagged permanently unprocessable")
+
     # run_phase1_batch.py (and main.py's process()) normalize copz->copc for
     # every S3 output key, so a tile whose catalog id has "copz" in it shows
     # up here under its .copc-normalized name even though full_df["id"]
@@ -71,8 +82,8 @@ def main():
     # 447 "remaining" tiles were already fully done under their normalized
     # name.
     normalized_id = full_df["id"].str.replace("copz", "copc", regex=False)
-    todo_df = full_df[~normalized_id.isin(processed_ids | problematic_ids)].reset_index(drop=True)
-    print(f"{len(todo_df):,} remaining after excluding processed + laz-problematic/")
+    todo_df = full_df[~normalized_id.isin(processed_ids | problematic_ids | unprocessable_ids)].reset_index(drop=True)
+    print(f"{len(todo_df):,} remaining after excluding processed + laz-problematic/ + laz-unprocessable/")
 
     todo_df.to_parquet(output_path, compression="zstd")
     print(f"wrote {len(todo_df):,} rows to {output_path}")

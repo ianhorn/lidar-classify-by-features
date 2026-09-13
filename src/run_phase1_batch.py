@@ -63,6 +63,27 @@ def upload_to_s3(local_path, bucket, key):
     print(f"uploaded {local_path} to s3://{bucket}/{key}")
 
 
+def report_unprocessable(item_id, error, bucket=S3_BUCKET):
+    """
+    Flag a tile as permanently unprocessable (as opposed to laz-problematic/'s
+    transient bad-source-href failures) -- e.g. a water-only tile with zero
+    Classification==2 points, which can never build a ground TIN for HAG no
+    matter how many times it's retried. Mirrors create_buffered_tile.py's
+    report_problematic() so refresh_todo_list.py can exclude both the same
+    way, instead of these tiles sitting in "remaining" forever getting
+    resubmitted for no effect.
+    """
+    df = pd.DataFrame([{
+        "item_id": item_id,
+        "error": error[:500],
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+    }])
+    local_path = Path(tempfile.gettempdir()) / f"{item_id}_unprocessable.parquet"
+    df.to_parquet(local_path)
+    upload_to_s3(local_path, bucket, f"phase2/laz-unprocessable/{item_id}_unprocessable.parquet")
+    local_path.unlink()
+
+
 def shard_ids(ids, shard_index, num_shards):
     if (shard_index is None) != (num_shards is None):
         raise ValueError("--shard-index and --num-shards must be given together")
@@ -180,18 +201,21 @@ def main():
             item_id, status, error = process_tile(item_id)
             print(f"{item_id}: {status}")
         except Exception as e:
-            # Full traceback, not just str(e) -- the UnicodeDecodeError
-            # showing up across many tiles has so far resisted every fix
-            # targeted at pystac's STAC API fetches (get_stac_item,
-            # search_stac), with zero change in rate -- meaning it's
-            # coming from somewhere else in process_tile() entirely (e.g.
-            # get_buffered_tile_footprints()'s DuckDB query against
-            # Overture's S3 bucket, a completely different network path).
-            # A file/line pinpoints it instead of guessing again.
+            # Full traceback, not just str(e) -- this is what pinpointed the
+            # UnicodeDecodeError's real source (a subprocess.run(text=True)
+            # crash in create_buffered_tile.py's crop_single_href, unrelated
+            # to the pystac STAC-fetch code originally suspected).
             import traceback
             tb = traceback.format_exc()
             print(f"ERROR processing {item_id}: {e}\n{tb}")
             status, error = "error", f"{e}\n{tb}"
+            if "can't build a ground TIN" in str(e):
+                # Zero Classification==2 points -- a water-only tile with no
+                # ground to triangulate. Not transient: retrying changes
+                # nothing, so flag it the same way report_problematic() flags
+                # bad source hrefs, instead of it sitting in "remaining"
+                # forever and getting resubmitted for no effect.
+                report_unprocessable(item_id, error)
         results.append((item_id, status, error))
 
     elapsed = time.perf_counter() - start
