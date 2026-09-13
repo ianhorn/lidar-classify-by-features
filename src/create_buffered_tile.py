@@ -134,14 +134,30 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
     return False, last_err
 
 
-def get_stac_item(item_id: str, item_collection: str, item_api_url: str):
+def get_stac_item(item_id: str, item_collection: str, item_api_url: str, retries=3, backoff=2.0):
     """
     this function uses pystac to grab the item from file (href)
+
+    Retries on a UnicodeDecodeError -- observed in production as an
+    intermittent failure (varying byte position/value each time, not a
+    fixed field), most likely a truncated/corrupted HTTP response under
+    load rather than a real encoding bug in the STAC data itself. Couldn't
+    reproduce it with up to 30 concurrent local requests, consistent with
+    something more like a rare connection reset than a deterministic bug
+    -- a plain retry is the appropriate mitigation either way.
     """
-    
+
     href = f'{item_api_url}/collections/{item_collection}/items/{item_id}'
-    stac_item = Item.from_file(href)
-    return stac_item
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            return Item.from_file(href)
+        except UnicodeDecodeError as e:
+            last_err = e
+            if attempt < retries:
+                print(f"WARNING: attempt {attempt}/{retries} failed fetching {href} ({e}), retrying")
+                time.sleep(backoff * attempt)
+    raise last_err
 
 
 def get_distance_degrees(meters: float):
@@ -246,11 +262,15 @@ def pdal_bounds(bbox):
     return f"([{xmin},{xmax}],[{ymin},{ymax}])"
 
 
-def search_stac(stac_api: str, collection: str, buffered_bbox):
+def search_stac(stac_api: str, collection: str, buffered_bbox, retries=3, backoff=2.0):
     """
     Use pystac_client to open the stac api
     search by bbox
     return a list of hrefs
+
+    Retries on a UnicodeDecodeError -- same intermittent failure as
+    get_stac_item (see its docstring), on the search response instead of a
+    single-item fetch.
     """
 
     client = Client.open(f'{stac_api}/')
@@ -260,8 +280,21 @@ def search_stac(stac_api: str, collection: str, buffered_bbox):
         bbox = buffered_bbox
     )
 
-    print(f'Found {len(list(search.items()))} items\n')
-    item_list = list(search.items())
+    item_list = None
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            item_list = list(search.items())
+            break
+        except UnicodeDecodeError as e:
+            last_err = e
+            if attempt < retries:
+                print(f"WARNING: attempt {attempt}/{retries} failed searching stac ({e}), retrying")
+                time.sleep(backoff * attempt)
+    if item_list is None:
+        raise last_err
+
+    print(f'Found {len(item_list)} items\n')
     # for i in item_list:
     #     print(i)
 
