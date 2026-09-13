@@ -138,21 +138,30 @@ def get_stac_item(item_id: str, item_collection: str, item_api_url: str, retries
     """
     this function uses pystac to grab the item from file (href)
 
-    Retries on a UnicodeDecodeError -- observed in production as an
-    intermittent failure (varying byte position/value each time, not a
-    fixed field), most likely a truncated/corrupted HTTP response under
-    load rather than a real encoding bug in the STAC data itself. Couldn't
-    reproduce it with up to 30 concurrent local requests, consistent with
-    something more like a rare connection reset than a deterministic bug
-    -- a plain retry is the appropriate mitigation either way.
+    Fetches with requests directly instead of pystac's own Item.from_file(),
+    which reads the response via a raw urllib3.PoolManager().request(
+    preload_content=False) + manual f.read().decode("utf-8") (see
+    pystac.stac_io.DefaultStacIO.read_text_from_href) -- a much less
+    battle-tested path than requests' own response handling. Root-caused in
+    production: every attempt (even retried 3x back to back) hit a
+    UnicodeDecodeError at a content-length-dependent byte position when run
+    on Fargate, for many different tiles, yet the exact same tile ids fetch
+    cleanly via plain requests.get() from both a local machine and this same
+    container image run locally -- something in that raw urllib3 read path
+    specifically misbehaves in the Fargate network environment. requests
+    (already a dependency here, already proven reliable against this exact
+    API) sidesteps it entirely. Retry kept as a second line of defense in
+    case of a genuine transient network issue on top of this.
     """
 
     href = f'{item_api_url}/collections/{item_collection}/items/{item_id}'
     last_err = None
     for attempt in range(1, retries + 1):
         try:
-            return Item.from_file(href)
-        except UnicodeDecodeError as e:
+            response = requests.get(href, timeout=30)
+            response.raise_for_status()
+            return Item.from_dict(response.json())
+        except (UnicodeDecodeError, requests.exceptions.RequestException) as e:
             last_err = e
             if attempt < retries:
                 print(f"WARNING: attempt {attempt}/{retries} failed fetching {href} ({e}), retrying")
