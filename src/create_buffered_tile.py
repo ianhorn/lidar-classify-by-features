@@ -22,10 +22,26 @@ from datetime import datetime, timezone
 from pystac import Item
 from pathlib import Path
 from pystac_client import Client
+from pystac_client.stac_api_io import StacApiIO
 from concurrent.futures import ThreadPoolExecutor
 
 
 S3_BUCKET = "lidar-classification"
+
+
+class RequestsStacApiIO(StacApiIO):
+    """
+    StacApiIO inherits read_text_from_href unchanged from pystac's
+    DefaultStacIO -- see search_stac's docstring. Routes it through the
+    same requests.Session StacApiIO.request() already uses, instead of the
+    raw urllib3.PoolManager().request(preload_content=False) + manual
+    f.read().decode("utf-8") that DefaultStacIO uses for plain reads.
+    """
+
+    def read_text_from_href(self, href: str) -> str:
+        response = self.session.get(href, timeout=self.timeout)
+        response.raise_for_status()
+        return response.text
 
 
 def upload_to_s3(local_path, bucket, key):
@@ -73,29 +89,56 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
     file and silently undercounts the tile, since `crop_copc` only fails
     hard if every href fails; a partial read failure otherwise never
     surfaces as an error.
+
+    readers.copc needs a well-formed COPC VLR (the octree/spatial-index
+    structure) to do its bounded, indexed read -- a source file that's
+    mislabeled or otherwise not a real COPC despite its extension fails
+    there with a VLR-related error. On that specific failure, switch to
+    readers.las + filters.crop for the remaining attempts: readers.las
+    reads the file as plain LAS/LAZ with no COPC VLR requirement at all,
+    at the cost of a full linear read instead of COPC's indexed one.
     """
 
-    pipeline = {
-        "pipeline": [
-            {"type": "readers.copc", "filename": href, "bounds": bounds},
-            {"type": "writers.las", "filename": str(out_path)},
-        ]
-    }
+    def build_pipeline(use_las_fallback):
+        if use_las_fallback:
+            reader = {"type": "readers.las", "filename": href}
+            crop = {"type": "filters.crop", "bounds": bounds}
+            return {"pipeline": [reader, crop, {"type": "writers.las", "filename": str(out_path)}]}
+        return {
+            "pipeline": [
+                {"type": "readers.copc", "filename": href, "bounds": bounds},
+                {"type": "writers.las", "filename": str(out_path)},
+            ]
+        }
 
     last_err = ""
+    use_las_fallback = False
     for attempt in range(1, retries + 1):
+        pipeline = build_pipeline(use_las_fallback)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(pipeline, f)
             pipeline_path = f.name
 
         try:
             try:
+                # capture_output as raw bytes, not text=True -- PDAL's C++
+                # error messages for a genuinely bad source href (an
+                # ArbiterError like the NoSuchKey/InvalidRange failures
+                # already seen in laz-problematic/ manifests) can contain a
+                # raw non-UTF8 byte. text=True's automatic strict-UTF8
+                # decode then raises UnicodeDecodeError *inside*
+                # subprocess.run() itself -- before this function's own
+                # retry/quarantine logic ever runs, escaping this try block
+                # entirely. Root-caused in production: this was
+                # misdiagnosed twice as a STAC-API fetch problem (fixing
+                # get_stac_item/search_stac had zero effect) before a
+                # direct traceback showed the real crash site was here.
                 result = subprocess.run(
                     ["pdal", "pipeline", pipeline_path],
                     capture_output=True,
-                    text=True,
                     timeout=300,
                 )
+                result.stderr = result.stderr.decode("utf-8", errors="replace")
             except subprocess.TimeoutExpired:
                 last_err = "timed out after 300s"
                 result = None
@@ -107,6 +150,10 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
 
         if result is not None:
             last_err = result.stderr
+            if not use_las_fallback and "vlr" in last_err.lower():
+                use_las_fallback = True
+                print(f"WARNING: {href} failed with a VLR-related error under readers.copc, "
+                      f"switching to readers.las+filters.crop")
 
         if attempt < retries:
             print(f"WARNING: attempt {attempt}/{retries} failed for {href} ({last_err.strip()[:200]}), retrying")
@@ -115,14 +162,39 @@ def crop_single_href(href, bounds, out_path, retries=3, backoff=2.0):
     return False, last_err
 
 
-def get_stac_item(item_id: str, item_collection: str, item_api_url: str):
+def get_stac_item(item_id: str, item_collection: str, item_api_url: str, retries=3, backoff=2.0):
     """
     this function uses pystac to grab the item from file (href)
+
+    Fetches with requests directly instead of pystac's own Item.from_file(),
+    which reads the response via a raw urllib3.PoolManager().request(
+    preload_content=False) + manual f.read().decode("utf-8") (see
+    pystac.stac_io.DefaultStacIO.read_text_from_href) -- a much less
+    battle-tested path than requests' own response handling. Root-caused in
+    production: every attempt (even retried 3x back to back) hit a
+    UnicodeDecodeError at a content-length-dependent byte position when run
+    on Fargate, for many different tiles, yet the exact same tile ids fetch
+    cleanly via plain requests.get() from both a local machine and this same
+    container image run locally -- something in that raw urllib3 read path
+    specifically misbehaves in the Fargate network environment. requests
+    (already a dependency here, already proven reliable against this exact
+    API) sidesteps it entirely. Retry kept as a second line of defense in
+    case of a genuine transient network issue on top of this.
     """
-    
+
     href = f'{item_api_url}/collections/{item_collection}/items/{item_id}'
-    stac_item = Item.from_file(href)
-    return stac_item
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            response = requests.get(href, timeout=30)
+            response.raise_for_status()
+            return Item.from_dict(response.json())
+        except (UnicodeDecodeError, requests.exceptions.RequestException) as e:
+            last_err = e
+            if attempt < retries:
+                print(f"WARNING: attempt {attempt}/{retries} failed fetching {href} ({e}), retrying")
+                time.sleep(backoff * attempt)
+    raise last_err
 
 
 def get_distance_degrees(meters: float):
@@ -227,22 +299,45 @@ def pdal_bounds(bbox):
     return f"([{xmin},{xmax}],[{ymin},{ymax}])"
 
 
-def search_stac(stac_api: str, collection: str, buffered_bbox):
+def search_stac(stac_api: str, collection: str, buffered_bbox, retries=3, backoff=2.0):
     """
     Use pystac_client to open the stac api
     search by bbox
     return a list of hrefs
+
+    Client.open() fetches the STAC API's landing page via StacApiIO.
+    read_text_from_href -- inherited unchanged from pystac's DefaultStacIO,
+    the same raw-urllib3-read path documented in get_stac_item's docstring.
+    (StacApiIO.request(), used for client.search()'s actual pagination
+    calls, already correctly uses requests/self.session -- confirmed via
+    StacApiIO's source: it defines request() but not
+    read_text_from_href(), so Client.open() alone was still hitting the
+    broken path.) RequestsStacApiIO overrides just that one inherited
+    method to route through the same session instead.
     """
 
-    client = Client.open(f'{stac_api}/')
+    client = Client.open(f'{stac_api}/', stac_io=RequestsStacApiIO())
     search = client.search(
         max_items=10,
         collections=collection,
         bbox = buffered_bbox
     )
 
-    print(f'Found {len(list(search.items()))} items\n')
-    item_list = list(search.items())
+    item_list = None
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            item_list = list(search.items())
+            break
+        except UnicodeDecodeError as e:
+            last_err = e
+            if attempt < retries:
+                print(f"WARNING: attempt {attempt}/{retries} failed searching stac ({e}), retrying")
+                time.sleep(backoff * attempt)
+    if item_list is None:
+        raise last_err
+
+    print(f'Found {len(item_list)} items\n')
     # for i in item_list:
     #     print(i)
 

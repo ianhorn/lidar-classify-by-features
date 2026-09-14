@@ -8,8 +8,13 @@ dependencies:
   - overturemaps
   - pdal
   - pip
+  - scikit-learn
   - scipy
   - shapely
+  # unpinned so conda-forge's __cuda virtual package detection picks the
+  # GPU-enabled build against whatever CUDA driver is present on the host
+  # instead of a hardcoded cpu/gpu variant
+  - xgboost
   - pip:
     - Authlib==1.7.2
     - Deprecated==1.3.1

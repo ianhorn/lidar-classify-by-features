@@ -31,22 +31,47 @@ def upload_to_s3(local_path, bucket, key):
     print(f"uploaded {local_path} to s3://{bucket}/{key}")
 
 
+MIN_GROUND_POINTS_FOR_HAG = 10
+
+
 def load_points(lasfile):
     """
     Read a LAS file and add HeightAboveGround via filters.hag_delaunay
     (builds a ground TIN from Classification == 2 points, computes each point's
     height above it). HeightAboveGround comes out in the same units as the
     source data (US survey feet here), since it's just Z - interpolated_ground_Z.
+
+    Reads once first, plain, to check there's enough ground to triangulate at
+    all. filters.hag_delaunay segfaults (an uncatchable C++ abort, not a
+    Python exception -- takes the whole process down, not just this tile)
+    when there are too few Classification==2 points to build a Delaunay
+    triangulation. Confirmed in production: a near-total-water tile (54,462
+    of 54,527 points were Classification 9/water, zero were ground) crashed
+    every attempt with SIGSEGV. 10 is comfortably above the mathematical
+    minimum (3 non-collinear points for one triangle) to also guard against
+    near-degenerate cases, while being a negligible fraction of any real
+    tile's point count.
     """
 
-    pipeline = {
+    read_pipeline = {"pipeline": [{"type": "readers.las", "filename": str(lasfile)}]}
+    p = pdal.Pipeline(json.dumps(read_pipeline))
+    p.execute()
+    arr = p.arrays[0]
+
+    ground_count = int((arr["Classification"] == 2).sum())
+    if ground_count < MIN_GROUND_POINTS_FOR_HAG:
+        raise ValueError(
+            f"only {ground_count} ground (Classification==2) points -- "
+            f"can't build a ground TIN to compute HAG (likely a water body or similar)"
+        )
+
+    hag_pipeline = {
         "pipeline": [
             {"type": "readers.las", "filename": str(lasfile)},
             {"type": "filters.hag_delaunay"},
         ]
     }
-
-    p = pdal.Pipeline(json.dumps(pipeline))
+    p = pdal.Pipeline(json.dumps(hag_pipeline))
     p.execute()
 
     return p.arrays[0]
