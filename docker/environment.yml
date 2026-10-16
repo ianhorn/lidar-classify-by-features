@@ -4,6 +4,7 @@ channels:
 dependencies:
   - boto3
   - duckdb
+  - gdal
   - geopandas
   - numpy
   - pandas
@@ -11,6 +12,7 @@ dependencies:
   - pyarrow
   - pystac
   - pystac-client
+  - rasterio
   - requests
   - scikit-learn
   - scipy

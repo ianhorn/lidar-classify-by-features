@@ -56,7 +56,7 @@ import xgboost as xgb
 from sklearn.metrics import classification_report
 from sklearn.model_selection import GroupShuffleSplit
 
-from common import FEATURE_COLUMNS, LABEL_COLUMN, S3_BUCKET, list_feature_tiles, tile_id_from_key
+from common import FEATURE_COLUMNS, LABEL_COLUMN, S3_BUCKET, list_feature_tiles, tile_id_from_key, upload_to_s3
 
 DEFAULT_N_TILES = 100
 DEFAULT_MAX_NONBUILDING_PER_TILE = 40_000
@@ -124,6 +124,9 @@ def main():
     parser.add_argument("--random-state", type=int, default=0)
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--model-out", default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--model-s3-key", default=None,
+                         help="also upload the saved model to this S3 key -- for Batch runs, where the "
+                              "container's local filesystem disappears when the job ends")
     args = parser.parse_args()
 
     print("listing available feature tiles in S3...")
@@ -180,6 +183,9 @@ def main():
     model_path.parent.mkdir(parents=True, exist_ok=True)
     model.save_model(model_path)
     print(f"\nsaved model to {model_path}")
+
+    if args.model_s3_key:
+        upload_to_s3(model_path, S3_BUCKET, args.model_s3_key)
 
 
 if __name__ == "__main__":

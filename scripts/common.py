@@ -23,6 +23,32 @@ FEATURES_PREFIX = "phase2/features/"
 # tagging, which is suspected to be wrong in places -- this model should
 # judge each point on its own geometry, not defer to a flag that might be
 # incorrect) and WithinFootprint (that's the label, not a feature).
+#
+# ReturnNumber/NumberOfReturns (backfilled across all feature tiles as of
+# 2026-09-13) were added specifically to help separate tree canopy from
+# rooftops -- tile N142E427 showed canopy false positives sitting at
+# building-like HAG (median 11.8ft) and overlapping real-building Intensity
+# (35-45K range), which neither HAG nor Intensity alone can filter. Canopy
+# is semi-transparent to lidar (a pulse often returns multiple times off
+# leaves/branches at different heights before, if ever, reaching a lower
+# surface), while a roof is a single hard reflective surface -- almost every
+# roof-strike pulse returns once. ReturnNumber > 1 or NumberOfReturns > 1
+# should read as "probably not a hard rooftop surface" in a way HAG/Intensity
+# can't capture.
+#
+# DistToBridge/InBridgeBuffer (see bridge_features.py, backfilled 2026-10-13)
+# address a different false-positive source: bridge decks, which sit at
+# building-like HAG and are flat/reflective like a roof, so neither of the
+# canopy-oriented features above catches them. They're computed from the
+# KYTC bridge inventory, independent of the point's own geometry.
+#
+# CanopyHeight (see canopy_features.py, backfilled 2026-10-13) is a second,
+# independent canopy signal from Meta/WRI's canopy height raster -- unlike
+# ReturnNumber/NumberOfReturns, it doesn't depend on how a given lidar pulse
+# happened to return, so it should be more robust on tiles where that proxy
+# is weaker. NaN (no raster data at that point, e.g. outside Kentucky) is
+# left as-is rather than filled -- XGBoost treats NaN as a native missing
+# value, which is what it actually is here, not a meaningful default.
 FEATURE_COLUMNS = [
     "HAG",
     "Planarity",
@@ -37,6 +63,11 @@ FEATURE_COLUMNS = [
     "NeighborCount",
     "Density",
     "Intensity",
+    "ReturnNumber",
+    "NumberOfReturns",
+    "DistToBridge",
+    "InBridgeBuffer",
+    "CanopyHeight",
 ]
 LABEL_COLUMN = "WithinFootprint"
 
