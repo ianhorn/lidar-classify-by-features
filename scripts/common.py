@@ -148,3 +148,27 @@ def shard_keys(keys, shard_index, num_shards):
     if not (0 <= shard_index < num_shards):
         raise ValueError(f"--shard-index {shard_index} out of range for --num-shards {num_shards}")
     return sorted(keys)[shard_index::num_shards]
+
+
+def add_keys_file_arg(parser):
+    parser.add_argument("--keys-file", help="text file of tile ids or feature keys (one per line); "
+                                            "restrict the run to just those tiles")
+
+
+def restrict_keys(keys, keys_file):
+    """Keep only keys whose tile id is listed in keys_file (None = keep all)."""
+
+    if keys_file is None:
+        return keys
+    if keys_file.startswith("s3://"):
+        # lets a Batch container read the list (a local path isn't visible there)
+        bucket, key = keys_file.removeprefix("s3://").split("/", 1)
+        text = boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+        lines = text.splitlines()
+    else:
+        with open(keys_file) as f:
+            lines = f.read().splitlines()
+    wanted = {tile_id_from_key(line.strip()) for line in lines if line.strip()}
+    kept = [k for k in keys if tile_id_from_key(k) in wanted]
+    print(f"--keys-file: {len(kept):,} of {len(keys):,} tiles selected ({len(wanted):,} listed)")
+    return kept

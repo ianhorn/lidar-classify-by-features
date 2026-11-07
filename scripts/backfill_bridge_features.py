@@ -45,7 +45,7 @@ import pyarrow.fs
 import pyarrow.parquet as pq
 
 from bridge_features import LINES_SHP, MAX_DIST_FT, bridges_near_points, compute_bridge_features, load_bridges
-from common import S3_BUCKET, add_shard_args, list_feature_tiles, shard_keys, tile_id_from_key, upload_to_s3
+from common import S3_BUCKET, add_keys_file_arg, add_shard_args, list_feature_tiles, restrict_keys, shard_keys, tile_id_from_key, upload_to_s3
 
 DEFAULT_WORKERS = 3  # each in-flight tile's parquet can run multiple GB -- see train_building_classifier.py
 
@@ -103,6 +103,7 @@ def main():
     parser.add_argument("--overwrite", action="store_true", help="reprocess tiles that already have InBridgeBuffer")
     parser.add_argument("--checkpoint", help="local file to record/resume confirmed tile_ids across restarts")
     add_shard_args(parser)
+    add_keys_file_arg(parser)
     args = parser.parse_args()
 
     bridges = load_bridges(args.bridges)
@@ -113,7 +114,7 @@ def main():
         return
 
     print("listing feature tiles in S3...")
-    keys = list_feature_tiles()
+    keys = restrict_keys(list_feature_tiles(), args.keys_file)
     print(f"{len(keys):,} feature tiles available")
 
     if args.n_tiles is not None:

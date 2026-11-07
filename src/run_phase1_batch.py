@@ -27,6 +27,7 @@ import argparse
 import os
 import tempfile
 import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import boto3
@@ -42,7 +43,7 @@ from scipy.spatial import cKDTree
 S3_BUCKET = "lidar-classification"
 STAC_URL = "https://drwgni8q1h.execute-api.us-west-2.amazonaws.com"
 COLLECTION = "laz-phase2"
-OVERTURE_RELEASE = "2026-07-22.0"
+OVERTURE_RELEASE = "2026-09-23.0"  # 07-22.0 was pruned upstream by 2026-11; see run_sync_batch.py
 OVERTURE_URL = f"s3://overturemaps-us-west-2/release/{OVERTURE_RELEASE}/theme=buildings/type=building/*"
 
 
@@ -94,7 +95,7 @@ def shard_ids(ids, shard_index, num_shards):
     return sorted(ids)[shard_index::num_shards]
 
 
-def process_tile(item_id):
+def process_tile(item_id, tile=None, force=False):
     """
     Same pipeline as main.py's process(): STAC search, crop COPC, buffer
     Overture footprints, compute geometric features, upload laz/buildings/
@@ -113,7 +114,7 @@ def process_tile(item_id):
     buildings_key = f"phase2/buildings/{output_id}_buffered30m.parquet"
     features_key = f"phase2/features/{output_id}.parquet"
     existing = [k for k in (laz_key, buildings_key, features_key) if s3_object_exists(S3_BUCKET, k)]
-    if len(existing) == 3:
+    if len(existing) == 3 and not force:
         return output_id, "skipped", ""
 
     # main.py's blind copz->copc replacement before the STAC fetch 404s for
@@ -125,14 +126,22 @@ def process_tile(item_id):
     # downstream consumer (features_file below, get_buffered_tile_footprints'
     # own output filename) still uses the same .copc-style naming as every
     # other tile, keeping S3 output consistent either way.
-    item = cbt.get_stac_item(item_id, COLLECTION, STAC_URL)
-    item.id = output_id
-    bbox = item.bbox
+    if tile is not None:
+        bbox, neighbors = tile
+        item = SimpleNamespace(id=output_id, bbox=bbox)
+    else:
+        item = cbt.get_stac_item(item_id, COLLECTION, STAC_URL)
+        item.id = output_id
+        bbox = item.bbox
 
     buffer = 30
     distance = cbt.get_distance_degrees(buffer)
     bbox_buffer = cbt.get_buffered_bbox(bbox, distance)
-    hrefs = cbt.search_stac(STAC_URL, COLLECTION, bbox_buffer)
+    if tile is None:
+        hrefs = cbt.search_stac(STAC_URL, COLLECTION, bbox_buffer)
+    else:
+        bx0, by0, bx1, by1 = bbox_buffer
+        hrefs = [h for (nx0, ny0, nx1, ny1), h in neighbors if nx0 <= bx1 and nx1 >= bx0 and ny0 <= by1 and ny1 >= by0]
 
     bbox_3089 = cbt.reproject_bbox(bbox_buffer)
     bounds = cbt.pdal_bounds(bbox_3089)

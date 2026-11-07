@@ -49,7 +49,7 @@ import boto3
 import pandas as pd
 import pdal
 
-from common import S3_BUCKET, add_shard_args, list_feature_tiles, shard_keys, tile_id_from_key, upload_to_s3
+from common import S3_BUCKET, add_keys_file_arg, add_shard_args, list_feature_tiles, restrict_keys, shard_keys, tile_id_from_key, upload_to_s3
 
 LAZ_PREFIX = "phase2/laz/"
 DEFAULT_WORKERS = 3  # each in-flight tile's parquet can run multiple GB -- see train_building_classifier.py
@@ -119,10 +119,11 @@ def main():
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--overwrite", action="store_true", help="reprocess tiles that already have ReturnNumber")
     add_shard_args(parser)
+    add_keys_file_arg(parser)
     args = parser.parse_args()
 
     print("listing feature tiles in S3...")
-    keys = list_feature_tiles()
+    keys = restrict_keys(list_feature_tiles(), args.keys_file)
     print(f"{len(keys):,} feature tiles available")
 
     if args.n_tiles is not None:

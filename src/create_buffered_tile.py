@@ -8,6 +8,7 @@ The points from each lidar will be read to create a new temporary local tile.
 
 
 import json
+import shutil
 import math
 import os
 import time
@@ -470,7 +471,7 @@ def crop_copc(hrefs, bounds, out_laz, quarantine_bucket=S3_BUCKET):
 
     for part_path in good_paths:
         part_path.unlink()
-    tmp_dir.rmdir()
+    shutil.rmtree(tmp_dir, ignore_errors=True)  # not rmdir(): a failed part crop can leave a stray file behind, which used to abort the whole tile after its laz was already uploaded
 
     upload_to_s3(out_laz, S3_BUCKET, f"phase2/laz/{Path(out_laz).name}")
 
