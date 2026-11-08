@@ -9,7 +9,7 @@ Classifies building points in Kentucky's [KyFromAbove](https://kyfromabove.ky.go
 
 Everything lives in the `lidar-classification` S3 bucket under `phase2/`.
 
-**Phase 1 - feature extraction** (`src/`), one tile at a time:
+**Feature extraction** (`src/`), one tile at a time:
 
 1. `create_buffered_tile.py` - buffer the tile's bbox, search STAC for neighboring COPC tiles, and crop their points into a temporary buffered tile (so edge points get full neighborhoods).
 2. Join Overture building footprints (buffered 30 m) to get the `WithinFootprint` label.
@@ -18,7 +18,7 @@ Everything lives in the `lidar-classification` S3 bucket under `phase2/`.
 
 Drivers: `main.py` (Dask on Coiled), `run_phase1_batch.py` (AWS Batch array job, used after Coiled credits ran out), and `run_sync_batch.py` (re-process tiles that changed upstream).
 
-**Phase 2 - classification** (`scripts/`):
+**Classification** (`scripts/`):
 
 - `train_building_classifier.py` - train on a stratified sample of feature parquets (`WithinFootprint` is the label). Models are saved as `building_classifier*.json`; v4 is in production.
 - `classify_tiles.py` - apply the model to every feature tile, writing `IsBuildingML` to `phase2/classified/`. Every point is classified, including those the source tagged noise (class 7/18). `IsBuildingML` also requires `HAG > --hag-floor`.
@@ -37,7 +37,7 @@ Defined in `FEATURE_COLUMNS` in `scripts/common.py`. X/Y/Z, the source `Classifi
 | `DistToBridge`, `InBridgeBuffer` | KYTC bridge inventory (`bridge_features.py`); filters bridge-deck false positives |
 | `CanopyHeight` | Meta/WRI canopy height raster (`canopy_features.py`) |
 
-The last three groups were added after phase 1, so `backfill_return_number.py`, `backfill_bridge_features.py` and `backfill_canopy_features.py` rewrite existing feature parquets on S3 instead of recomputing everything.
+The last three groups were added after the initial extraction run, so `backfill_return_number.py`, `backfill_bridge_features.py` and `backfill_canopy_features.py` rewrite existing feature parquets on S3 instead of recomputing everything.
 
 ## Keeping outputs in sync with upstream
 
@@ -52,7 +52,7 @@ Housekeeping: `refresh_todo_list.py` rebuilds the todo list (`stac_item_list.par
 ## Running at scale
 
 - **Coiled**: `src/main.py`, looped by `scripts/continuous_run.sh`. Environment built by `create_coiled_environment.py`.
-- **AWS Batch**: `docker/Dockerfile` (CUDA runtime base, one image for CPU and GPU job definitions). Phase 1 and backfills use CPU jobs; `classify_tiles.py` uses a GPU job. About 112 very dense tiles have feature parquets over 4 GB and OOM at 30 GB / 4 vCPU, so use `--workers 1` or the high-memory job definition for full-tile-set runs.
+- **AWS Batch**: `docker/Dockerfile` (CUDA runtime base, one image for CPU and GPU job definitions). Feature extraction and backfills use CPU jobs; `classify_tiles.py` uses a GPU job. About 112 very dense tiles have feature parquets over 4 GB and OOM at 30 GB / 4 vCPU, so use `--workers 1` or the high-memory job definition for full-tile-set runs.
 
 ## Environment
 
