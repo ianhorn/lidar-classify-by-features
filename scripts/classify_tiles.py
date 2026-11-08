@@ -47,8 +47,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import xgboost as xgb
+from scipy import ndimage
 
 from common import (
     FEATURE_COLUMNS,
@@ -69,9 +71,39 @@ CONTEXT_COLUMNS = ["X", "Y", "Z", "Classification", "WithinFootprint"]
 DEFAULT_MODEL_PATH = "scripts/building_classifier.json"
 DEFAULT_WORKERS = 3  # I/O bound, but each in-flight tile can run multiple GB -- see train_building_classifier.py
 DEFAULT_HAG_FLOOR = 2.0  # feet -- see module docstring for why
+DEFAULT_MIN_AREA = 64.0  # sq ft -- ArcGIS Pro's Classify LAS Building default minimum area
+BLOB_CELL = 3.0  # ft -- grid cell edge for measuring cluster area (the tile CRS, EPSG:3089, is in US feet)
 
 
-def classify_tile(key, model, overwrite, hag_floor):
+def drop_small_clusters(df, flag, min_area, cell=BLOB_CELL):
+    """
+    Return `flag` with every connected cluster of flagged points smaller than
+    min_area (sq ft) switched off. Area is the number of occupied BLOB_CELL
+    grid cells times the cell area, so it measures where flagged points are,
+    not a fitted roof surface -- sparse points undercount a little. Measured
+    on 12 tiles: clusters under ~54 sq ft were 99.9% points the Overture
+    footprint disagrees with (see scripts/analyze_false_positives.py), so
+    this removes mostly isolated noise, vehicles and stray vegetation.
+    Clusters are found per tile, so one cut by a tile edge can look smaller
+    than it is.
+    """
+
+    if min_area <= 0 or not flag.any():
+        return flag
+    x0, y0 = df["X"].min(), df["Y"].min()
+    ix = ((df.loc[flag, "X"] - x0) / cell).astype(int).to_numpy()
+    iy = ((df.loc[flag, "Y"] - y0) / cell).astype(int).to_numpy()
+    grid = np.zeros((ix.max() + 1, iy.max() + 1), dtype=bool)
+    grid[ix, iy] = True
+    labeled, n = ndimage.label(grid)
+    area = np.bincount(labeled[grid], minlength=n + 1) * cell ** 2
+    keep = area[labeled[ix, iy]] >= min_area
+    out = flag.copy()
+    out.loc[flag] = keep
+    return out
+
+
+def classify_tile(key, model, overwrite, hag_floor, min_area=DEFAULT_MIN_AREA):
     """
     Read one tile's features from S3, score every point, and upload a
     parquet with the context columns plus BuildingProbability/IsBuildingML
@@ -92,7 +124,8 @@ def classify_tile(key, model, overwrite, hag_floor):
 
     proba = model.predict_proba(df[FEATURE_COLUMNS])[:, 1]
     df["BuildingProbability"] = proba
-    df["IsBuildingML"] = (proba >= 0.5) & (df["HAG"] > hag_floor)
+    df["IsBuildingRaw"] = (proba >= 0.5) & (df["HAG"] > hag_floor)
+    df["IsBuildingML"] = drop_small_clusters(df, df["IsBuildingRaw"], min_area)
 
     # Quick eyeball stats, computed here while the data's already in
     # memory rather than a separate re-read of the uploaded output.
@@ -125,6 +158,9 @@ def main():
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
     parser.add_argument("--hag-floor", type=float, default=DEFAULT_HAG_FLOOR,
                          help="require HAG above this (feet) for IsBuildingML, on top of the model's probability cutoff")
+    parser.add_argument("--min-area", type=float, default=DEFAULT_MIN_AREA,
+                         help="drop building clusters smaller than this many sq ft from IsBuildingML "
+                              "(0 disables); IsBuildingRaw keeps the unfiltered flag")
     add_shard_args(parser)
     args = parser.parse_args()
 
@@ -147,7 +183,7 @@ def main():
     start = time.perf_counter()
     results = []
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        futures = {executor.submit(classify_tile, key, model, args.overwrite, args.hag_floor): key for key in keys}
+        futures = {executor.submit(classify_tile, key, model, args.overwrite, args.hag_floor, args.min_area): key for key in keys}
         for future in as_completed(futures):
             key = futures[future]
             tile_id = tile_id_from_key(key)
